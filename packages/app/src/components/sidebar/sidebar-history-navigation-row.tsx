@@ -1,5 +1,5 @@
 import { usePathname } from "expo-router";
-import { MessagesSquare } from "lucide-react-native";
+import { History } from "lucide-react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
 
 interface SidebarHistoryNavigationRowProps {
@@ -12,11 +12,11 @@ export function SidebarHistoryNavigationRow({ onPress }: SidebarHistoryNavigatio
 
   return (
     <SidebarHeaderRow
-      icon={MessagesSquare}
+      icon={History}
       label="History"
       onPress={onPress}
       isActive={isSessionsActive}
-      testID="sidebar-sessions"
+      testID="sidebar-history"
     />
   );
 }

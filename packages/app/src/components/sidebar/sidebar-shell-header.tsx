@@ -21,8 +21,8 @@ export function SidebarShellHeader({
     <Fragment>
       {withTitlebarDragRegion ? <TitlebarDragRegion /> : null}
       {topSpacerStyle ? <View style={topSpacerStyle} /> : null}
-      {toggleSlot}
       {children}
+      {toggleSlot}
     </Fragment>
   );
 

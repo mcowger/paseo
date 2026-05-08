@@ -2,7 +2,10 @@ import equal from "fast-deep-equal";
 import { useMemo } from "react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSessionStore } from "@/stores/session-store";
-import type { SidebarProjectEntry } from "@/hooks/use-sidebar-workspaces-list";
+import {
+  createSidebarWorkspaceEntry,
+  type SidebarProjectEntry,
+} from "@/hooks/use-sidebar-workspaces-list";
 import type { SidebarSessionWorkspace } from "./types";
 import {
   createSidebarSessionWorkspaceLookup,
@@ -17,7 +20,7 @@ export function useSidebarSessionWorkspaces(input: {
   serverId: string | null;
   projects: readonly SidebarProjectEntry[];
 }): SidebarSessionWorkspace[] {
-  const workspaceDirectoryById = useStoreWithEqualityFn(
+  const workspaceFieldsById = useStoreWithEqualityFn(
     useSessionStore,
     (state) => {
       if (!input.serverId) {
@@ -28,11 +31,16 @@ export function useSidebarSessionWorkspaces(input: {
         return {};
       }
 
-      const directoryById: Record<string, string> = {};
+      const fieldsById: Record<string, { name: string; workspaceDirectory: string | undefined }> =
+        {};
       for (const workspace of workspaces.values()) {
-        directoryById[workspace.id] = workspace.workspaceDirectory;
+        const entry = createSidebarWorkspaceEntry({ serverId: input.serverId, workspace });
+        fieldsById[entry.workspaceId] = {
+          name: entry.name,
+          workspaceDirectory: entry.workspaceDirectory,
+        };
       }
-      return directoryById;
+      return fieldsById;
     },
     equal,
   );
@@ -45,7 +53,8 @@ export function useSidebarSessionWorkspaces(input: {
     const result: SidebarSessionWorkspace[] = [];
     for (const project of input.projects) {
       for (const workspace of project.workspaces) {
-        const workspaceDirectory = workspaceDirectoryById[workspace.workspaceId];
+        const workspaceFields = workspaceFieldsById[workspace.workspaceId];
+        const workspaceDirectory = workspaceFields?.workspaceDirectory;
         if (!workspaceDirectory) {
           continue;
         }
@@ -53,7 +62,7 @@ export function useSidebarSessionWorkspaces(input: {
           serverId: input.serverId,
           workspaceId: workspace.workspaceId,
           workspaceKey: workspace.workspaceKey,
-          workspaceName: workspace.name,
+          workspaceName: workspaceFields.name,
           projectKey: project.projectKey,
           projectName: project.projectName,
           workspaceDirectory,
@@ -61,7 +70,7 @@ export function useSidebarSessionWorkspaces(input: {
       }
     }
     return result;
-  }, [input.projects, input.serverId, workspaceDirectoryById]);
+  }, [input.projects, input.serverId, workspaceFieldsById]);
 }
 
 export function useVisibleSidebarSessionFilterProjects(input: {
@@ -99,7 +108,10 @@ export function useVisibleSidebarSessionFilterProjects(input: {
       deriveSidebarSessionFilterProjects({
         projects: input.projects,
         availability,
+        workspaceNameByKey: new Map(
+          workspaces.map((workspace) => [workspace.workspaceKey, workspace.workspaceName]),
+        ),
       }),
-    [availability, input.projects],
+    [availability, input.projects, workspaces],
   );
 }

@@ -289,11 +289,9 @@ async function expectWorkspaceFocusedOnSession(
   });
   await waitForWorkspaceTabsVisible(page);
   await expectWorkspaceTabVisible(page, input.agent.id);
-  await expect(page.getByRole("button", { name: input.agent.title, exact: true })).toHaveAttribute(
-    "aria-selected",
-    "true",
-    { timeout: 30_000 },
-  );
+  await expect(
+    page.getByTestId(`workspace-tab-agent_${input.agent.id}`).filter({ visible: true }).first(),
+  ).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
 }
 
 async function openHistoryFromSidebar(page: Page) {

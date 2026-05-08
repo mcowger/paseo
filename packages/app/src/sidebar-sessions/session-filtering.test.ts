@@ -192,6 +192,7 @@ describe("sidebar session filtering", () => {
         },
       ],
       availability,
+      workspaceNameByKey: new Map([["server-1:workspace-1", "Main"]]),
     });
 
     expect(filterProjects.map(projectWorkspaceKeys)).toEqual([

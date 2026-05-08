@@ -109,6 +109,7 @@ export function deriveSidebarSessionFilterAvailability(input: {
 export function deriveSidebarSessionFilterProjects(input: {
   projects: readonly SidebarProjectEntry[];
   availability: SidebarSessionFilterAvailability;
+  workspaceNameByKey: ReadonlyMap<string, string>;
 }): SidebarProjectEntry[] {
   if (input.projects.length === 0 || input.availability.workspaceKeys.length === 0) {
     return [];
@@ -122,9 +123,12 @@ export function deriveSidebarSessionFilterProjects(input: {
     if (!visibleProjectKeys.has(project.projectKey)) {
       continue;
     }
-    const workspaces = project.workspaces.filter((workspace) =>
-      visibleWorkspaceKeys.has(workspace.workspaceKey),
-    );
+    const workspaces = project.workspaces
+      .filter((workspace) => visibleWorkspaceKeys.has(workspace.workspaceKey))
+      .map((workspace) => {
+        const name = input.workspaceNameByKey.get(workspace.workspaceKey);
+        return name && name !== workspace.name ? Object.assign({}, workspace, { name }) : workspace;
+      });
     if (workspaces.length === 0) {
       continue;
     }

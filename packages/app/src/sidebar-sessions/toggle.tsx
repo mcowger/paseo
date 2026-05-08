@@ -1,15 +1,16 @@
-import { Filter } from "lucide-react-native";
+import { Folder, Folders, ListFilter, MessagesSquare, type LucideIcon } from "lucide-react-native";
 import { memo, useCallback, useMemo, type ReactElement } from "react";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import { Image, Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useProjectIconQuery } from "@/hooks/use-project-icon-query";
 import type { SidebarProjectEntry } from "@/hooks/use-sidebar-workspaces-list";
 import type { SidebarSessionFilter, SidebarSessionViewMode } from "./types";
 import { useVisibleSidebarSessionFilterProjects } from "./use-sidebar-session-workspaces";
@@ -22,6 +23,9 @@ interface SidebarSessionsToggleProps {
   onModeChange: (mode: SidebarSessionViewMode) => void;
   onFilterChange: (filter: SidebarSessionFilter) => void;
 }
+
+const PILL_TRANSITION = LinearTransition.duration(160);
+const LABEL_FADE = { in: FadeIn.duration(120), out: FadeOut.duration(80) };
 
 export const SidebarSessionsToggle = memo(function SidebarSessionsToggle({
   serverId,
@@ -45,10 +49,18 @@ export const SidebarSessionsToggle = memo(function SidebarSessionsToggle({
       <View style={styles.pillGroup}>
         <TogglePill
           label="Workspaces"
-          active={mode === "workspaces"}
+          icon={Folders}
+          active={!sessionsActive}
           onPress={handleWorkspacesPress}
+          testID="sidebar-toggle-workspaces"
         />
-        <TogglePill label="Sessions" active={sessionsActive} onPress={handleSessionsPress} />
+        <TogglePill
+          label="Sessions"
+          icon={MessagesSquare}
+          active={sessionsActive}
+          onPress={handleSessionsPress}
+          testID="sidebar-toggle-sessions"
+        />
       </View>
       {sessionsActive ? (
         <SidebarSessionsFilterMenu
@@ -75,7 +87,6 @@ function SidebarSessionsFilterMenu({
 }) {
   const { theme } = useUnistyles();
   const filterActive = filter.type !== "all";
-  const filterIconColor = filterActive ? theme.colors.accentForeground : theme.colors.foreground;
   const visibleFilterProjects = useVisibleSidebarSessionFilterProjects({ serverId, projects });
 
   const handleAllSelect = useCallback(() => {
@@ -85,15 +96,19 @@ function SidebarSessionsFilterMenu({
   const filterTriggerStyle = useCallback(
     ({ hovered = false, open = false }: PressableStateCallbackType & { open?: boolean }) => [
       styles.filterButton,
-      filterActive && styles.filterButtonActive,
-      (hovered || open) && !filterActive && styles.filterButtonHovered,
+      (hovered || open || filterActive) && styles.filterButtonHovered,
     ],
     [filterActive],
   );
 
   const filterIcon = useMemo(
-    () => <Filter size={theme.iconSize.sm} color={filterIconColor} />,
-    [filterIconColor, theme.iconSize.sm],
+    () => (
+      <ListFilter
+        size={theme.iconSize.sm}
+        color={filterActive ? theme.colors.foreground : theme.colors.foregroundMuted}
+      />
+    ),
+    [filterActive, theme.colors.foreground, theme.colors.foregroundMuted, theme.iconSize.sm],
   );
 
   return (
@@ -114,7 +129,7 @@ function SidebarSessionsFilterMenu({
         {visibleFilterProjects.length > 0 ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
+            <FilterSectionHeading>Workspace</FilterSectionHeading>
             {visibleFilterProjects.flatMap((project) =>
               project.workspaces.map((workspace) => (
                 <WorkspaceFilterItem
@@ -130,13 +145,15 @@ function SidebarSessionsFilterMenu({
               )),
             )}
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>Projects</DropdownMenuLabel>
+            <FilterSectionHeading>Project</FilterSectionHeading>
             {visibleFilterProjects.map((project) => (
               <ProjectFilterItem
                 key={project.projectKey}
                 selected={filter.type === "project" && filter.projectKey === project.projectKey}
                 label={project.projectName}
                 projectKey={project.projectKey}
+                serverId={serverId}
+                iconWorkingDir={project.iconWorkingDir}
                 onFilterChange={onFilterChange}
               />
             ))}
@@ -149,45 +166,62 @@ function SidebarSessionsFilterMenu({
 
 function TogglePill({
   label,
+  icon: Icon,
   active,
   onPress,
+  testID,
 }: {
   label: string;
+  icon: LucideIcon;
   active: boolean;
   onPress: () => void;
+  testID?: string;
 }) {
-  const pillStyle = useCallback(
-    ({ hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
-      styles.pill,
-      active && styles.pillActive,
-      hovered && !active && styles.pillHovered,
-    ],
-    [active],
+  const { theme } = useUnistyles();
+  const iconColor = active ? theme.colors.foreground : theme.colors.foregroundMuted;
+  const pillStyleActive = useMemo(() => [styles.pill, styles.pillActive], []);
+  const pillStyleHovered = useMemo(() => [styles.pill, styles.pillHovered], []);
+  const renderInner = useCallback(
+    ({ hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => {
+      let pillStyle;
+      if (active) pillStyle = pillStyleActive;
+      else if (hovered) pillStyle = pillStyleHovered;
+      else pillStyle = styles.pill;
+      return (
+        <Animated.View layout={PILL_TRANSITION} style={pillStyle}>
+          <Icon size={theme.iconSize.sm} color={iconColor} />
+          {active ? (
+            <Animated.Text
+              entering={LABEL_FADE.in}
+              exiting={LABEL_FADE.out}
+              style={styles.pillTextActive}
+            >
+              {label}
+            </Animated.Text>
+          ) : null}
+        </Animated.View>
+      );
+    },
+    [Icon, active, iconColor, label, pillStyleActive, pillStyleHovered, theme.iconSize.sm],
   );
-  const textStyle = useMemo(() => [styles.pillText, active && styles.pillTextActive], [active]);
 
   return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={pillStyle}>
-      <Text style={textStyle}>{label}</Text>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      testID={testID}
+    >
+      {renderInner}
     </Pressable>
   );
 }
 
-function FilterItem({
-  selected,
-  label,
-  description,
-  onSelect,
-}: {
-  selected: boolean;
-  label: string;
-  description?: string;
-  onSelect: () => void;
-}) {
+function FilterSectionHeading({ children }: { children: string }) {
   return (
-    <DropdownMenuItem selected={selected} description={description} onSelect={onSelect}>
-      {label}
-    </DropdownMenuItem>
+    <View style={styles.filterSectionHeading}>
+      <Text style={styles.filterSectionHeadingText}>{children}</Text>
+    </View>
   );
 }
 
@@ -209,12 +243,9 @@ function WorkspaceFilterItem({
   }, [onFilterChange, workspaceKey]);
 
   return (
-    <FilterItem
-      selected={selected}
-      label={label}
-      description={description}
-      onSelect={handleSelect}
-    />
+    <DropdownMenuItem selected={selected} description={description} onSelect={handleSelect}>
+      {label}
+    </DropdownMenuItem>
   );
 }
 
@@ -222,18 +253,55 @@ function ProjectFilterItem({
   selected,
   label,
   projectKey,
+  serverId,
+  iconWorkingDir,
   onFilterChange,
 }: {
   selected: boolean;
   label: string;
   projectKey: string;
+  serverId: string | null;
+  iconWorkingDir: string;
   onFilterChange: (filter: SidebarSessionFilter) => void;
 }) {
   const handleSelect = useCallback(() => {
     onFilterChange({ type: "project", projectKey });
   }, [onFilterChange, projectKey]);
 
-  return <FilterItem selected={selected} label={label} onSelect={handleSelect} />;
+  const leading = useMemo(
+    () => <ProjectIconLeading serverId={serverId} cwd={iconWorkingDir} />,
+    [serverId, iconWorkingDir],
+  );
+
+  return (
+    <DropdownMenuItem selected={selected} leading={leading} onSelect={handleSelect}>
+      {label}
+    </DropdownMenuItem>
+  );
+}
+
+function ProjectIconLeading({ serverId, cwd }: { serverId: string | null; cwd: string }) {
+  const { theme } = useUnistyles();
+  const { icon } = useProjectIconQuery({ serverId: serverId ?? "", cwd });
+  const dataUri = useMemo(() => {
+    if (!icon || !icon.mimeType || !icon.data) {
+      return null;
+    }
+    return `data:${icon.mimeType};base64,${icon.data}`;
+  }, [icon]);
+  const imageSource = useMemo(() => (dataUri ? { uri: dataUri } : null), [dataUri]);
+
+  return (
+    <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+      {imageSource ? (
+        <Image source={imageSource} style={styles.projectIconImage} />
+      ) : (
+        <View style={styles.projectIconFallback}>
+          <Folder size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
+        </View>
+      )}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -242,40 +310,33 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "space-between",
     gap: theme.spacing[2],
-    paddingHorizontal: {
-      xs: theme.spacing[3],
-      md: theme.spacing[4],
-    },
-    paddingTop: theme.spacing[3],
+    paddingHorizontal: theme.spacing[2],
+    paddingTop: theme.spacing[2],
     paddingBottom: theme.spacing[2],
   },
   pillGroup: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1],
-    padding: 2,
-    borderRadius: theme.borderRadius.lg,
-    backgroundColor: theme.colors.surfaceSidebarHover,
     minWidth: 0,
   },
   pill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
     minHeight: 28,
-    justifyContent: "center",
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[2],
     borderRadius: theme.borderRadius.md,
   },
   pillActive: {
-    backgroundColor: theme.colors.surface1,
+    backgroundColor: theme.colors.surfaceSidebarHover,
+    paddingRight: theme.spacing[3],
   },
   pillHovered: {
-    backgroundColor: theme.colors.surfaceSidebar,
-  },
-  pillText: {
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-    color: theme.colors.foregroundMuted,
+    backgroundColor: theme.colors.surfaceSidebarHover,
   },
   pillTextActive: {
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
   },
   filterButton: {
@@ -289,9 +350,6 @@ const styles = StyleSheet.create((theme) => ({
   filterButtonHovered: {
     backgroundColor: theme.colors.surfaceSidebarHover,
   },
-  filterButtonActive: {
-    backgroundColor: theme.colors.accent,
-  },
   filterBadge: {
     position: "absolute",
     top: 5,
@@ -299,6 +357,26 @@ const styles = StyleSheet.create((theme) => ({
     width: 5,
     height: 5,
     borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.accentForeground,
+    backgroundColor: theme.colors.foreground,
+  },
+  filterSectionHeading: {
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[2],
+    paddingBottom: theme.spacing[1],
+  },
+  filterSectionHeadingText: {
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
+  },
+  projectIconImage: {
+    width: theme.iconSize.sm,
+    height: theme.iconSize.sm,
+    borderRadius: theme.borderRadius.sm,
+  },
+  projectIconFallback: {
+    width: theme.iconSize.sm,
+    height: theme.iconSize.sm,
+    alignItems: "center",
+    justifyContent: "center",
   },
 }));

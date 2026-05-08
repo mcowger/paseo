@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useMemo, type ReactElement } from "react";
+import React, { memo, useCallback, useMemo, useState, type ReactElement } from "react";
 import {
   FlatList,
   Pressable,
@@ -19,7 +19,6 @@ import {
 import type { SidebarProjectEntry } from "@/hooks/use-sidebar-workspaces-list";
 import { useSessionStore } from "@/stores/session-store";
 import { navigateToPreparedWorkspaceTab, prepareWorkspaceTab } from "@/utils/workspace-navigation";
-import { shortenPath } from "@/utils/shorten-path";
 import { formatTimeAgo } from "@/utils/time";
 import {
   createSidebarSessionWorkspaceLookup,
@@ -100,6 +99,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
   serverId: string;
 }): ReactElement | null {
   const { theme } = useUnistyles();
+  const [isHovered, setIsHovered] = useState(false);
   const agent = useSessionStore(
     useShallow((state) => selectSidebarSessionSlice(state, serverId, id)),
   );
@@ -135,14 +135,20 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
       target,
     });
   }, [agentCwd, id, serverId]);
+
+  const handlePointerEnter = useCallback(() => setIsHovered(true), []);
+  const handlePointerLeave = useCallback(() => setIsHovered(false), []);
+
   const pressableStyle = useCallback(
-    ({ pressed, hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
+    ({ pressed }: PressableStateCallbackType) => [
       styles.row,
-      hovered && styles.rowHovered,
+      isHovered && styles.rowHovered,
       pressed && styles.rowPressed,
     ],
-    [],
+    [isHovered],
   );
+
+  const titleStyle = useMemo(() => [styles.title, isHovered && styles.titleHovered], [isHovered]);
 
   if (!agent || agent.archivedAt) {
     return null;
@@ -151,27 +157,25 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
   const ProviderIcon = getProviderIcon(agent.provider);
 
   return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={handlePress}
-      style={pressableStyle}
-      testID={`sidebar-session-row-${serverId}-${id}`}
-    >
-      <View style={styles.providerIconWrap}>
-        <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
-      </View>
-      <View style={styles.rowContent}>
-        <View style={styles.titleRow}>
-          <Text style={styles.title} numberOfLines={1}>
-            {agent.title || "New session"}
-          </Text>
-          <Text style={styles.timeAgo}>{formatTimeAgo(agent.lastActivityAt)}</Text>
+    <View onPointerEnter={handlePointerEnter} onPointerLeave={handlePointerLeave}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={agent.title || "New session"}
+        onPress={handlePress}
+        style={pressableStyle}
+        testID={`sidebar-session-row-${serverId}-${id}`}
+      >
+        <View style={styles.providerIconWrap}>
+          <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
         </View>
-        <Text style={styles.path} numberOfLines={1}>
-          {shortenPath(agent.cwd)}
+        <Text style={titleStyle} numberOfLines={1}>
+          {agent.title || "New session"}
         </Text>
-      </View>
-    </Pressable>
+        <Text style={styles.timeAgo} numberOfLines={1}>
+          {formatTimeAgo(agent.lastActivityAt)}
+        </Text>
+      </Pressable>
+    </View>
   );
 });
 
@@ -189,22 +193,19 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 0,
   },
   listContent: {
-    paddingHorizontal: {
-      xs: theme.spacing[3],
-      md: theme.spacing[4],
-    },
+    paddingHorizontal: theme.spacing[2],
     paddingTop: theme.spacing[2],
-    paddingBottom: theme.spacing[6],
-    gap: theme.spacing[1],
+    paddingBottom: theme.spacing[4],
   },
   row: {
-    minHeight: 52,
+    minHeight: 36,
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
     paddingVertical: theme.spacing[2],
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[2],
     borderRadius: theme.borderRadius.lg,
+    marginBottom: theme.spacing[1],
   },
   rowHovered: {
     backgroundColor: theme.colors.surfaceSidebarHover,
@@ -214,39 +215,30 @@ const styles = StyleSheet.create((theme) => ({
   },
   providerIconWrap: {
     width: theme.iconSize.md,
+    height: theme.iconSize.md,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-  },
-  rowContent: {
-    flex: 1,
-    minWidth: 0,
-  },
-  titleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    minWidth: 0,
   },
   title: {
     flex: 1,
     minWidth: 0,
     fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
+    fontWeight: "400",
+    lineHeight: 20,
     color: theme.colors.foreground,
+    opacity: 0.76,
+  },
+  titleHovered: {
+    opacity: 1,
   },
   timeAgo: {
     flexShrink: 0,
     fontSize: theme.fontSize.xs,
     color: theme.colors.foregroundMuted,
   },
-  path: {
-    marginTop: 2,
-    fontSize: theme.fontSize.xs,
-    color: theme.colors.foregroundMuted,
-  },
   emptyState: {
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[6],
   },
   emptyText: {
