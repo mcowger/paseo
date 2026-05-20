@@ -32,6 +32,15 @@ const CATALOG_DATA = [
     command: ["amp-acp"],
   },
   {
+    id: "antigravity",
+    title: "Google Antigravity CLI",
+    description: "Terminal-first surface to interact with Antigravity agents",
+    version: "1.0.0",
+    iconId: "antigravity",
+    installLink: "https://www.antigravity.google/product/antigravity-cli",
+    command: ["paseo", "acp", "antigravity"],
+  },
+  {
     id: "auggie",
     title: "Auggie CLI",
     description:

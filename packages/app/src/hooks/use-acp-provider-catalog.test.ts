@@ -36,6 +36,7 @@ describe("ACP provider catalog", () => {
 
   it("uses PATH commands for entries that were binary distributions upstream", () => {
     expect(findProvider("amp-acp").command).toEqual(["amp-acp"]);
+    expect(findProvider("antigravity").command).toEqual(["paseo", "acp", "antigravity"]);
     expect(findProvider("cursor").command).toEqual(["cursor-agent", "acp"]);
     expect(findProvider("deepseek-tui").command).toEqual(["deepseek", "serve", "--acp"]);
     expect(findProvider("goose").command).toEqual(["goose", "acp"]);
@@ -56,6 +57,14 @@ describe("ACP provider catalog", () => {
         },
       },
     });
+  });
+
+  it("bundles the Antigravity catalog metadata and icon", () => {
+    const provider = findProvider("antigravity");
+
+    expect(provider.description).toBe("Terminal-first surface to interact with Antigravity agents");
+    expect(provider.installLink).toBe("https://www.antigravity.google/product/antigravity-cli");
+    expect(provider.iconSvg).toContain("<svg");
   });
 
   it("preserves provider env in the daemon config patch", () => {

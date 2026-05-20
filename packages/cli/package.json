@@ -23,6 +23,7 @@
     "test:e2e:lifecycle": "npx tsx tests/e2e/agent-lifecycle.test.ts"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.17.1",
     "@clack/prompts": "^1.0.0",
     "@getpaseo/server": "0.1.78",
     "chalk": "^5.3.0",

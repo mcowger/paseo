@@ -1,5 +1,6 @@
 import { Command, Option } from "commander";
 import { createAgentCommand } from "./commands/agent/index.js";
+import { createAcpCommand } from "./commands/acp/index.js";
 import { createDaemonCommand } from "./commands/daemon/index.js";
 import { createChatCommand } from "./commands/chat/index.js";
 import { createLoopCommand } from "./commands/loop/index.js";
@@ -94,6 +95,7 @@ export function createCli(): Command {
   );
 
   // Top-level local daemon shortcuts
+  program.addCommand(createAcpCommand());
   program.addCommand(onboardCommand());
   program.addCommand(daemonStartCommand());
 
