@@ -137,6 +137,7 @@ import type {
   AgentPermissionRequest,
   AgentPermissionResponse,
   AgentPersistenceHandle,
+  AgentPlanAction,
   ProviderStatus,
   AgentRuntimeInfo,
   AgentTimelineItem,
@@ -317,6 +318,12 @@ export const AgentPermissionResponseSchema: z.ZodType<AgentPermissionResponse> =
     interrupt: z.boolean().optional(),
   }),
 ]);
+
+const AgentPlanActionSchema: z.ZodType<AgentPlanAction> = z.object({
+  id: z.string(),
+  label: z.string(),
+  variant: z.enum(["primary", "secondary", "danger"]).optional(),
+});
 
 export const AgentPermissionRequestPayloadSchema: z.ZodType<
   AgentPermissionRequest,
@@ -532,6 +539,12 @@ export const AgentTimelineItemPayloadSchema: z.ZodType<AgentTimelineItem, z.ZodT
           completed: z.boolean(),
         }),
       ),
+    }),
+    z.object({
+      type: z.literal("plan"),
+      planId: z.string(),
+      text: z.string(),
+      actions: z.array(AgentPlanActionSchema).optional(),
     }),
     z.object({
       type: z.literal("error"),
@@ -1308,6 +1321,15 @@ export const AgentPermissionResponseMessageSchema = z.object({
   response: AgentPermissionResponseSchema,
 });
 
+export const AgentPlanRespondRequestMessageSchema = z.object({
+  type: z.literal("agent.plan.respond.request"),
+  agentId: z.string(),
+  planId: z.string(),
+  actionId: z.string(),
+  feedback: z.string().optional(),
+  requestId: z.string(),
+});
+
 const CheckoutErrorCodeSchema = z.enum([
   "NOT_GIT_REPO",
   "NOT_ALLOWED",
@@ -1879,6 +1901,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureRequestMessageSchema,
   AgentRewindRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
+  AgentPlanRespondRequestMessageSchema,
   CheckoutStatusRequestSchema,
   SubscribeCheckoutDiffRequestSchema,
   UnsubscribeCheckoutDiffRequestSchema,
@@ -2115,6 +2138,8 @@ export const ServerInfoStatusPayloadSchema = z
       .object({
         providersSnapshot: z.boolean().optional(),
         checkoutGithubSetAutoMerge: z.boolean().optional(),
+        // COMPAT(firstClassPlans): added in v0.1.82, remove gate after 2026-11-28.
+        firstClassPlans: z.boolean().optional(),
         // COMPAT(daemonStatusRpc): added in v0.1.76, remove gate after 2026-11-18.
         daemonStatusRpc: z.boolean().optional(),
         // COMPAT(terminalRestoreModes): added in v0.1.81, remove gate after 2026-11-23.
@@ -2676,6 +2701,17 @@ export const SendAgentMessageResponseMessageSchema = z.object({
     agentId: z.string(),
     accepted: z.boolean(),
     error: z.string().nullable(),
+  }),
+});
+
+export const AgentPlanRespondResponseMessageSchema = z.object({
+  type: z.literal("agent.plan.respond.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    planId: z.string(),
+    ok: z.boolean(),
+    error: z.string().nullable().optional(),
   }),
 });
 
@@ -3658,6 +3694,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CancelAgentResponseMessageSchema,
   ClearAgentAttentionResponseMessageSchema,
   SendAgentMessageResponseMessageSchema,
+  AgentPlanRespondResponseMessageSchema,
   SetVoiceModeResponseMessageSchema,
   DaemonGetStatusResponseSchema,
   DaemonGetPairingOfferResponseSchema,
@@ -4068,6 +4105,7 @@ export const WSHelloMessageSchema = z.object({
     .object({
       voice: z.boolean().optional(),
       pushNotifications: z.boolean().optional(),
+      [CLIENT_CAPS.firstClassPlans]: z.boolean().optional(),
       [CLIENT_CAPS.reasoningMergeEnum]: z.boolean().optional(),
       [CLIENT_CAPS.customModeIcons]: z.boolean().optional(),
     })
