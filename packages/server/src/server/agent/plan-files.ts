@@ -3,18 +3,15 @@ import fs from "node:fs/promises";
 import type { AgentTimelineItem, ToolCallTimelineItem } from "./agent-sdk-types.js";
 
 const PLAN_FILE_EXTENSIONS = new Set([".md", ".markdown"]);
-const PLAN_DIRECTORIES = new Set([
-  `${path.sep}.paseo${path.sep}plans${path.sep}`,
-  `${path.sep}.opencode${path.sep}plans${path.sep}`,
-]);
+const PLAN_DIRECTORIES = new Set(["/.paseo/plans/", "/.opencode/plans/"]);
 
 export function isPlanFilePath(filePath: string): boolean {
-  const normalized = path.normalize(filePath);
-  const ext = path.extname(normalized).toLowerCase();
+  const normalized = normalizePlanPath(filePath);
+  const ext = path.posix.extname(normalized).toLowerCase();
   if (!PLAN_FILE_EXTENSIONS.has(ext)) {
     return false;
   }
-  const searchable = normalized.startsWith(path.sep) ? normalized : `${path.sep}${normalized}`;
+  const searchable = normalized.startsWith("/") ? normalized : `/${normalized}`;
   return Array.from(PLAN_DIRECTORIES).some((dir) => searchable.includes(dir));
 }
 
@@ -43,9 +40,13 @@ export async function planItemFromToolCall(params: {
 
   return {
     type: "plan",
-    planId: `plan-file:${path.normalize(detail.filePath)}`,
+    planId: `plan-file:${normalizePlanPath(detail.filePath)}`,
     text: text.trim(),
   };
+}
+
+function normalizePlanPath(filePath: string): string {
+  return path.posix.normalize(filePath.replace(/\\/g, "/"));
 }
 
 async function readPlanFile(
