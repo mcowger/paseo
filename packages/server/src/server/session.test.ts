@@ -2569,7 +2569,7 @@ describe("session checkout refresh handling", () => {
     });
 
     await asSessionInternals(session).handleCheckoutRefreshRequest({
-      type: "checkout_refresh_request",
+      type: "checkout.refresh.request",
       cwd: "/tmp/request-worktree",
       requestId: "request-refresh",
     });
@@ -2582,7 +2582,7 @@ describe("session checkout refresh handling", () => {
     });
     expect(checkoutDiffManager.scheduleRefreshForCwd).toHaveBeenCalledWith("/tmp/request-worktree");
     expect(messages).toContainEqual({
-      type: "checkout_refresh_response",
+      type: "checkout.refresh.response",
       payload: {
         cwd: "/tmp/request-worktree",
         success: true,
@@ -2607,14 +2607,14 @@ describe("session checkout refresh handling", () => {
     });
 
     await asSessionInternals(session).handleCheckoutRefreshRequest({
-      type: "checkout_refresh_request",
+      type: "checkout.refresh.request",
       cwd: "/tmp/request-worktree",
       requestId: "request-refresh-error",
     });
 
     expect(checkoutDiffManager.scheduleRefreshForCwd).not.toHaveBeenCalled();
     expect(messages).toContainEqual({
-      type: "checkout_refresh_response",
+      type: "checkout.refresh.response",
       payload: {
         cwd: "/tmp/request-worktree",
         success: false,

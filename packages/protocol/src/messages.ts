@@ -1383,7 +1383,7 @@ export const CheckoutPushRequestSchema = z.object({
 });
 
 export const CheckoutRefreshRequestSchema = z.object({
-  type: z.literal("checkout_refresh_request"),
+  type: z.literal("checkout.refresh.request"),
   cwd: z.string(),
   requestId: z.string(),
 });
@@ -3085,7 +3085,7 @@ export const CheckoutPushResponseSchema = z.object({
 });
 
 export const CheckoutRefreshResponseSchema = z.object({
-  type: z.literal("checkout_refresh_response"),
+  type: z.literal("checkout.refresh.response"),
   payload: z.object({
     cwd: z.string(),
     success: z.boolean(),

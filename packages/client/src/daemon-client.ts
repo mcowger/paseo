@@ -2956,10 +2956,10 @@ export class DaemonClient {
     return this.sendCorrelatedSessionRequest({
       requestId,
       message: {
-        type: "checkout_refresh_request",
+        type: "checkout.refresh.request",
         cwd,
       },
-      responseType: "checkout_refresh_response",
+      responseType: "checkout.refresh.response",
       timeout: 60000,
     });
   }

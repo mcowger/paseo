@@ -25,7 +25,8 @@ import {
   type ViewStyle,
   type TextStyle,
 } from "react-native";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet, useUnistyles, withUnistyles } from "react-native-unistyles";
+import type { Theme } from "@/styles/theme";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import {
   AlignJustify,
@@ -1235,13 +1236,16 @@ interface DiffRefreshButtonProps {
   onPress: () => void;
 }
 
+const ThemedRefreshCw = withUnistyles(RefreshCw);
+const ThemedRefreshActivityIndicator = withUnistyles(ActivityIndicator);
+const refreshIconColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+
 function DiffRefreshButton({
   isRefreshing,
   isMobile,
   toggleStyle,
   onPress,
 }: DiffRefreshButtonProps) {
-  const { theme } = useUnistyles();
   const iconSize = isMobile ? 18 : 14;
   return (
     <Tooltip delayDuration={300}>
@@ -1255,9 +1259,9 @@ function DiffRefreshButton({
           disabled={isRefreshing}
         >
           {isRefreshing ? (
-            <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+            <ThemedRefreshActivityIndicator size="small" uniProps={refreshIconColorMapping} />
           ) : (
-            <RefreshCw size={iconSize} color={theme.colors.foregroundMuted} />
+            <ThemedRefreshCw size={iconSize} uniProps={refreshIconColorMapping} />
           )}
         </Pressable>
       </TooltipTrigger>

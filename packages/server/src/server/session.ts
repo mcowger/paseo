@@ -2056,7 +2056,7 @@ export class Session {
         return this.handleCheckoutPullRequest(msg);
       case "checkout_push_request":
         return this.handleCheckoutPushRequest(msg);
-      case "checkout_refresh_request":
+      case "checkout.refresh.request":
         return this.handleCheckoutRefreshRequest(msg);
       case "checkout_pr_create_request":
         return this.handleCheckoutPrCreateRequest(msg);
@@ -5323,7 +5323,7 @@ export class Session {
   }
 
   private async handleCheckoutRefreshRequest(
-    msg: Extract<SessionInboundMessage, { type: "checkout_refresh_request" }>,
+    msg: Extract<SessionInboundMessage, { type: "checkout.refresh.request" }>,
   ): Promise<void> {
     const { cwd, requestId } = msg;
 
@@ -5336,7 +5336,7 @@ export class Session {
       });
       this.checkoutDiffManager.scheduleRefreshForCwd(cwd);
       this.emit({
-        type: "checkout_refresh_response",
+        type: "checkout.refresh.response",
         payload: {
           cwd,
           success: true,
@@ -5346,7 +5346,7 @@ export class Session {
       });
     } catch (error) {
       this.emit({
-        type: "checkout_refresh_response",
+        type: "checkout.refresh.response",
         payload: {
           cwd,
           success: false,
