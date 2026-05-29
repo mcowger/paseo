@@ -10,6 +10,7 @@ import {
   mkdirSync,
 } from "fs";
 import { join } from "path";
+import { win32 } from "node:path";
 import { tmpdir } from "os";
 import {
   __resetCheckoutShortstatCacheForTests,
@@ -2356,9 +2357,15 @@ const x = 1;
     });
 
     it("matches worktrees under a custom PASEO_HOME", () => {
+      const customPaseoHome = process.platform === "win32" ? "C:\\paseo" : "/var/lib/paseo";
+      const worktreePath =
+        process.platform === "win32"
+          ? win32.join(customPaseoHome, "worktrees", "project", "feature")
+          : `${customPaseoHome}/worktrees/project/feature`;
+
       expect(
-        isPaseoWorktreePath("/var/lib/paseo/worktrees/project/feature", {
-          paseoHome: "/var/lib/paseo",
+        isPaseoWorktreePath(worktreePath, {
+          paseoHome: customPaseoHome,
         }),
       ).toBe(true);
     });
