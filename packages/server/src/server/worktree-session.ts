@@ -381,7 +381,6 @@ export async function handlePaseoWorktreeListRequest(
   dependencies: {
     emit: EmitSessionMessage;
     paseoHome?: string;
-    worktreesRoot?: string;
     workspaceGitService: WorkspaceGitService;
   },
   msg: Extract<SessionInboundMessage, { type: "paseo_worktree_list_request" }>,

@@ -2355,6 +2355,14 @@ const x = 1;
       expect(isPaseoWorktreePath("C:\\Users\\dev\\.paseo\\worktrees\\feature")).toBe(true);
     });
 
+    it("matches worktrees under a custom PASEO_HOME", () => {
+      expect(
+        isPaseoWorktreePath("/var/lib/paseo/worktrees/project/feature", {
+          paseoHome: "/var/lib/paseo",
+        }),
+      ).toBe(true);
+    });
+
     it("rejects paths without .paseo/worktrees segment", () => {
       expect(isPaseoWorktreePath("/home/user/repo")).toBe(false);
       expect(isPaseoWorktreePath("C:\\Users\\dev\\repo")).toBe(false);

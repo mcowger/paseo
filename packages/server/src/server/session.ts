@@ -5706,7 +5706,6 @@ export class Session {
       {
         emit: (message) => this.emit(message),
         paseoHome: this.paseoHome,
-        worktreesRoot: this.worktreesRoot,
         workspaceGitService: this.workspaceGitService,
       },
       msg,

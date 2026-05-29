@@ -923,7 +923,7 @@ export function isPaseoWorktreePath(
   p: string,
   options?: { paseoHome?: string; worktreesRoot?: string },
 ): boolean {
-  if (options?.worktreesRoot) {
+  if (options?.worktreesRoot || options?.paseoHome) {
     return isDescendantPath(p, resolvePaseoWorktreesBaseRoot(options));
   }
   return /[/\\]\.paseo[/\\]worktrees[/\\]/.test(p);
