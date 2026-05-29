@@ -41,6 +41,7 @@ import {
   ListChevronsUpDown,
   Pilcrow,
   RefreshCcw,
+  RefreshCw,
   Upload,
   WrapText,
 } from "lucide-react-native";
@@ -78,6 +79,11 @@ import { lineNumberGutterWidth } from "@/components/code-insets";
 import { useWebScrollViewScrollbar } from "@/components/use-web-scrollbar";
 import { GitActionsSplitButton } from "@/git/actions-split-button";
 import { useGitActions } from "@/git/use-actions";
+import { invalidateCheckoutGitQueriesForClient } from "@/git/query-keys";
+import { useToast } from "@/contexts/toast-context";
+import { useHostRuntimeClient } from "@/runtime/host-runtime";
+import { useSessionStore } from "@/stores/session-store";
+import { useQueryClient } from "@tanstack/react-query";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { usePanelStore } from "@/stores/panel-store";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
@@ -1222,6 +1228,46 @@ function DiffFilesToolbar({
   );
 }
 
+interface DiffRefreshButtonProps {
+  isRefreshing: boolean;
+  isMobile: boolean;
+  toggleStyle: PressableStyleFn;
+  onPress: () => void;
+}
+
+function DiffRefreshButton({
+  isRefreshing,
+  isMobile,
+  toggleStyle,
+  onPress,
+}: DiffRefreshButtonProps) {
+  const { theme } = useUnistyles();
+  const iconSize = isMobile ? 18 : 14;
+  return (
+    <Tooltip delayDuration={300}>
+      <TooltipTrigger asChild>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Refresh git and GitHub state"
+          testID="changes-refresh"
+          style={toggleStyle}
+          onPress={onPress}
+          disabled={isRefreshing}
+        >
+          {isRefreshing ? (
+            <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+          ) : (
+            <RefreshCw size={iconSize} color={theme.colors.foregroundMuted} />
+          )}
+        </Pressable>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">
+        <Text style={styles.tooltipText}>Refresh</Text>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 type DiffFlatItem =
   | { type: "header"; file: ParsedDiffFile; fileIndex: number; isExpanded: boolean }
   | { type: "body"; file: ParsedDiffFile; fileIndex: number };
@@ -1558,6 +1604,43 @@ export function GitDiffPane({
     () => buildExpandAllButtonStyle(controlSurfaceColor),
     [controlSurfaceColor],
   );
+
+  const refreshToggleStyle = useMemo(
+    () => buildExpandAllButtonStyle(controlSurfaceColor),
+    [controlSurfaceColor],
+  );
+
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const refreshClient = useHostRuntimeClient(serverId);
+  const refreshSupported = useSessionStore(
+    (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutRefresh === true,
+  );
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = useCallback(() => {
+    if (isRefreshing) {
+      return;
+    }
+    if (!refreshClient) {
+      toast.error("Host is offline. Reconnect to refresh.");
+      return;
+    }
+    setIsRefreshing(true);
+    void (async () => {
+      try {
+        const payload = await refreshClient.checkoutRefresh(cwd);
+        if (payload.error) {
+          throw new Error(payload.error.message);
+        }
+        await invalidateCheckoutGitQueriesForClient(queryClient, { serverId, cwd });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to refresh git state.");
+      } finally {
+        setIsRefreshing(false);
+      }
+    })();
+  }, [cwd, isRefreshing, queryClient, refreshClient, serverId, toast]);
 
   const {
     status,
@@ -2086,6 +2169,14 @@ export function GitDiffPane({
                   expandAllToggleStyle={expandAllToggleStyle}
                   onToggleWrapLines={handleToggleWrapLines}
                   onToggleExpandAll={handleToggleExpandAll}
+                />
+              ) : null}
+              {refreshSupported ? (
+                <DiffRefreshButton
+                  isRefreshing={isRefreshing}
+                  isMobile={isMobile}
+                  toggleStyle={refreshToggleStyle}
+                  onPress={handleRefresh}
                 />
               ) : null}
             </View>
