@@ -75,6 +75,7 @@ type AgentWorktreeSetupTimelineWriter = (input: {
 
 interface BuildAgentSessionConfigDependencies {
   paseoHome?: string;
+  worktreesRoot?: string;
   sessionLogger: Logger;
   workspaceGitService?: WorkspaceGitService;
   createPaseoWorktree: (
@@ -95,6 +96,7 @@ interface BuildAgentSessionConfigDependencies {
 
 interface CreatePaseoWorktreeInBackgroundDependencies {
   paseoHome?: string;
+  worktreesRoot?: string;
   emitWorkspaceUpdateForCwd: (cwd: string, options?: { dedupeGitState?: boolean }) => Promise<void>;
   cacheWorkspaceSetupSnapshot: (workspaceId: string, snapshot: WorkspaceSetupSnapshot) => void;
   emit: EmitSessionMessage;
@@ -158,6 +160,7 @@ interface HandleWorkspaceSetupStatusRequestDependencies {
 
 interface HandleCreatePaseoWorktreeRequestDependencies {
   paseoHome?: string;
+  worktreesRoot?: string;
   describeWorkspaceRecord: (
     result: CreatePaseoWorktreeResult,
   ) => Promise<WorkspaceDescriptorPayload>;
@@ -224,6 +227,7 @@ export async function buildAgentSessionConfig(
         firstAgentContext,
         runSetup: false,
         paseoHome: dependencies.paseoHome,
+        worktreesRoot: dependencies.worktreesRoot,
       },
       {
         resolveDefaultBranch: normalized.baseBranch
@@ -377,6 +381,7 @@ export async function handlePaseoWorktreeListRequest(
   dependencies: {
     emit: EmitSessionMessage;
     paseoHome?: string;
+    worktreesRoot?: string;
     workspaceGitService: WorkspaceGitService;
   },
   msg: Extract<SessionInboundMessage, { type: "paseo_worktree_list_request" }>,
@@ -491,6 +496,7 @@ export async function handleCreatePaseoWorktreeRequest(
     const commandResult = await createPaseoWorktreeCommand(
       {
         paseoHome: dependencies.paseoHome,
+        worktreesRoot: dependencies.worktreesRoot,
         createPaseoWorktreeWorkflow: dependencies.createPaseoWorktreeWorkflow,
       },
       {
@@ -572,6 +578,7 @@ export async function createPaseoWorktreeWorkflow(
       ...input,
       runSetup: false,
       paseoHome: input.paseoHome ?? dependencies.paseoHome,
+      worktreesRoot: input.worktreesRoot ?? dependencies.worktreesRoot,
     },
     options?.resolveDefaultBranch
       ? { resolveDefaultBranch: options.resolveDefaultBranch }
