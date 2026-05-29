@@ -26,7 +26,7 @@ import {
   type TextStyle,
 } from "react-native";
 import { StyleSheet, useUnistyles, withUnistyles } from "react-native-unistyles";
-import type { Theme } from "@/styles/theme";
+import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import {
   AlignJustify,
@@ -42,7 +42,7 @@ import {
   ListChevronsUpDown,
   Pilcrow,
   RefreshCcw,
-  RefreshCw,
+  RotateCw,
   Upload,
   WrapText,
 } from "lucide-react-native";
@@ -83,7 +83,7 @@ import { useGitActions } from "@/git/use-actions";
 import { useCheckoutGitActionsStore } from "@/git/actions-store";
 import { useToast } from "@/contexts/toast-context";
 import { useSessionStore } from "@/stores/session-store";
-import { SyncedLoader } from "@/components/synced-loader";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { usePanelStore } from "@/stores/panel-store";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
@@ -1230,38 +1230,33 @@ function DiffFilesToolbar({
 
 interface DiffRefreshButtonProps {
   isRefreshing: boolean;
-  isMobile: boolean;
   toggleStyle: PressableStyleFn;
   onPress: () => void;
 }
 
-const ThemedRefreshCw = withUnistyles(RefreshCw);
-const ThemedSyncedLoader = withUnistyles(SyncedLoader);
+const ThemedRotateCw = withUnistyles(RotateCw);
+const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const refreshIconColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
-function DiffRefreshButton({
-  isRefreshing,
-  isMobile,
-  toggleStyle,
-  onPress,
-}: DiffRefreshButtonProps) {
-  const iconSize = isMobile ? 18 : 14;
+function DiffRefreshButton({ isRefreshing, toggleStyle, onPress }: DiffRefreshButtonProps) {
   return (
     <Tooltip delayDuration={300}>
       <TooltipTrigger asChild>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Refresh git and GitHub state"
+          accessibilityLabel={isRefreshing ? "Refreshing" : "Refresh git and GitHub state"}
           testID="changes-refresh"
           style={toggleStyle}
           onPress={onPress}
           disabled={isRefreshing}
         >
-          {isRefreshing ? (
-            <ThemedSyncedLoader size={iconSize} uniProps={refreshIconColorMapping} />
-          ) : (
-            <ThemedRefreshCw size={iconSize} uniProps={refreshIconColorMapping} />
-          )}
+          <View style={styles.refreshIcon}>
+            {isRefreshing ? (
+              <ThemedLoadingSpinner size={ICON_SIZE.sm} uniProps={refreshIconColorMapping} />
+            ) : (
+              <ThemedRotateCw size={ICON_SIZE.sm} uniProps={refreshIconColorMapping} />
+            )}
+          </View>
         </Pressable>
       </TooltipTrigger>
       <TooltipContent side="bottom">
@@ -2163,7 +2158,6 @@ export function GitDiffPane({
               {refreshSupported ? (
                 <DiffRefreshButton
                   isRefreshing={isRefreshing}
-                  isMobile={isMobile}
                   toggleStyle={refreshToggleStyle}
                   onPress={handleRefresh}
                 />
@@ -2295,6 +2289,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   toggleButtonSelected: {
     backgroundColor: theme.colors.surface2,
+  },
+  refreshIcon: {
+    width: ICON_SIZE.md,
+    height: ICON_SIZE.md,
+    alignItems: "center",
+    justifyContent: "center",
   },
   expandAllButton: {
     flexDirection: "row",
