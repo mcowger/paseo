@@ -80,11 +80,9 @@ import { lineNumberGutterWidth } from "@/components/code-insets";
 import { useWebScrollViewScrollbar } from "@/components/use-web-scrollbar";
 import { GitActionsSplitButton } from "@/git/actions-split-button";
 import { useGitActions } from "@/git/use-actions";
-import { invalidateCheckoutGitQueriesForClient } from "@/git/query-keys";
+import { useCheckoutGitActionsStore } from "@/git/actions-store";
 import { useToast } from "@/contexts/toast-context";
-import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import { useQueryClient } from "@tanstack/react-query";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { usePanelStore } from "@/stores/panel-store";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
@@ -1615,36 +1613,22 @@ export function GitDiffPane({
   );
 
   const toast = useToast();
-  const queryClient = useQueryClient();
-  const refreshClient = useHostRuntimeClient(serverId);
   const refreshSupported = useSessionStore(
     (s) => s.sessions[serverId]?.serverInfo?.features?.checkoutRefresh === true,
   );
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const runRefresh = useCheckoutGitActionsStore((s) => s.refresh);
+  const isRefreshing =
+    useCheckoutGitActionsStore((s) => s.getStatus({ serverId, cwd, actionId: "refresh" })) ===
+    "pending";
 
   const handleRefresh = useCallback(() => {
     if (isRefreshing) {
       return;
     }
-    if (!refreshClient) {
-      toast.error("Host is offline. Reconnect to refresh.");
-      return;
-    }
-    setIsRefreshing(true);
-    void (async () => {
-      try {
-        const payload = await refreshClient.checkoutRefresh(cwd);
-        if (payload.error) {
-          throw new Error(payload.error.message);
-        }
-        await invalidateCheckoutGitQueriesForClient(queryClient, { serverId, cwd });
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to refresh git state.");
-      } finally {
-        setIsRefreshing(false);
-      }
-    })();
-  }, [cwd, isRefreshing, queryClient, refreshClient, serverId, toast]);
+    void runRefresh({ serverId, cwd }).catch((error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to refresh git state.");
+    });
+  }, [cwd, isRefreshing, runRefresh, serverId, toast]);
 
   const {
     status,
