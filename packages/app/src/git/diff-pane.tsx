@@ -83,6 +83,7 @@ import { useGitActions } from "@/git/use-actions";
 import { useCheckoutGitActionsStore } from "@/git/actions-store";
 import { useToast } from "@/contexts/toast-context";
 import { useSessionStore } from "@/stores/session-store";
+import { SyncedLoader } from "@/components/synced-loader";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { usePanelStore } from "@/stores/panel-store";
 import { buildWorkspaceExplorerStateKey } from "@/hooks/use-file-explorer-actions";
@@ -1235,7 +1236,7 @@ interface DiffRefreshButtonProps {
 }
 
 const ThemedRefreshCw = withUnistyles(RefreshCw);
-const ThemedRefreshActivityIndicator = withUnistyles(ActivityIndicator);
+const ThemedSyncedLoader = withUnistyles(SyncedLoader);
 const refreshIconColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 function DiffRefreshButton({
@@ -1257,7 +1258,7 @@ function DiffRefreshButton({
           disabled={isRefreshing}
         >
           {isRefreshing ? (
-            <ThemedRefreshActivityIndicator size="small" uniProps={refreshIconColorMapping} />
+            <ThemedSyncedLoader size={iconSize} uniProps={refreshIconColorMapping} />
           ) : (
             <ThemedRefreshCw size={iconSize} uniProps={refreshIconColorMapping} />
           )}
