@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { buildScriptHostname } from "../utils/script-hostname.js";
+import { buildPublicScriptHostname, buildScriptHostname } from "../utils/script-hostname.js";
 import type { ScriptRouteEntry, ScriptRouteStore } from "./script-proxy.js";
 
 interface BranchChangeRouteHandlerOptions {
@@ -11,6 +11,7 @@ interface BranchChangeRouteHandlerOptions {
 interface RouteHostnameUpdate {
   oldHostname: string;
   newHostname: string;
+  newPublicHostname: string | null;
   route: ScriptRouteEntry;
 }
 
@@ -31,10 +32,19 @@ export function createBranchChangeRouteHandler(
         branchName: newBranch,
         scriptName: route.scriptName,
       });
-      if (newHostname !== route.hostname) {
+      const newPublicHostname = route.publicHostname
+        ? buildPublicScriptHostname({
+            projectSlug: route.projectSlug,
+            branchName: newBranch,
+            scriptName: route.scriptName,
+            publicBaseUrl: `http://${route.publicHostname.split(".").slice(1).join(".")}`,
+          })
+        : null;
+      if (newHostname !== route.hostname || newPublicHostname !== (route.publicHostname ?? null)) {
         updates.push({
           oldHostname: route.hostname,
           newHostname,
+          newPublicHostname,
           route,
         });
       }
@@ -44,10 +54,11 @@ export function createBranchChangeRouteHandler(
       return;
     }
 
-    for (const { oldHostname, newHostname, route } of updates) {
+    for (const { oldHostname, newHostname, newPublicHostname, route } of updates) {
       options.routeStore.removeRoute(oldHostname);
       options.routeStore.registerRoute({
         hostname: newHostname,
+        publicHostname: newPublicHostname,
         port: route.port,
         workspaceId: route.workspaceId,
         projectSlug: route.projectSlug,

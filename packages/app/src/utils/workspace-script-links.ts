@@ -14,6 +14,19 @@ function isLoopbackHost(host: string): boolean {
   );
 }
 
+function isLocalOnlyUrl(url: string | null | undefined): boolean {
+  if (!url) {
+    return true;
+  }
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    return isLoopbackHost(hostname) || hostname.endsWith(".localhost");
+  } catch {
+    return true;
+  }
+}
+
 function buildDirectServiceUrl(endpoint: string, port: number): string | null {
   try {
     const { host, isIpv6 } = parseHostPort(endpoint);
@@ -37,8 +50,13 @@ export function resolveWorkspaceScriptLink(input: {
     return { openUrl: null, labelUrl: script.proxyUrl };
   }
 
+  const proxyUrlIsLocalOnly = isLocalOnlyUrl(script.proxyUrl);
+
   if (activeConnection.type === "relay") {
-    return { openUrl: null, labelUrl: script.proxyUrl };
+    return {
+      openUrl: proxyUrlIsLocalOnly ? null : script.proxyUrl,
+      labelUrl: script.proxyUrl,
+    };
   }
 
   if (activeConnection.type === "directSocket" || activeConnection.type === "directPipe") {
@@ -52,6 +70,10 @@ export function resolveWorkspaceScriptLink(input: {
     }
   } catch {
     return { openUrl: null, labelUrl: script.proxyUrl };
+  }
+
+  if (!proxyUrlIsLocalOnly) {
+    return { openUrl: script.proxyUrl, labelUrl: script.proxyUrl };
   }
 
   if (script.port === null) {

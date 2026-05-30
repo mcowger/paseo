@@ -6,8 +6,26 @@ interface BuildScriptHostnameOptions {
   scriptName: string;
 }
 
+interface BuildPublicScriptHostnameOptions extends BuildScriptHostnameOptions {
+  publicBaseUrl: string;
+}
+
 function toHostnameLabel(value: string): string {
   return slugify(value) || "untitled";
+}
+
+function toPublicServiceLabel({
+  projectSlug,
+  branchName,
+  scriptName,
+}: BuildScriptHostnameOptions): string {
+  const labels = [toHostnameLabel(scriptName)];
+  const isDefaultBranch = branchName === null || branchName === "main" || branchName === "master";
+  if (!isDefaultBranch) {
+    labels.push(toHostnameLabel(branchName));
+  }
+  labels.push(toHostnameLabel(projectSlug));
+  return labels.join("--");
 }
 
 export function buildScriptHostname({
@@ -24,4 +42,19 @@ export function buildScriptHostname({
   }
 
   return `${serviceHostnameLabel}.${toHostnameLabel(branchName)}.${projectHostnameLabel}.localhost`;
+}
+
+export function buildPublicScriptHostname({
+  publicBaseUrl,
+  ...script
+}: BuildPublicScriptHostnameOptions): string {
+  const base = new URL(publicBaseUrl);
+  return `${toPublicServiceLabel(script)}.${base.hostname}`;
+}
+
+export function buildPublicScriptProxyUrl(options: BuildPublicScriptHostnameOptions): string {
+  const base = new URL(options.publicBaseUrl);
+  const hostname = buildPublicScriptHostname(options);
+  const port = base.port ? `:${base.port}` : "";
+  return `${base.protocol}//${hostname}${port}`;
 }
