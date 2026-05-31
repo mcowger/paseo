@@ -1936,13 +1936,16 @@ describe("archivePaseoWorktree", () => {
   });
 
   test("archives the workspace record even when the teardown script fails", async () => {
+    const teardownLogPath = isPlatform("win32")
+      ? 'Set-Content -Path (Join-Path $env:PASEO_SOURCE_CHECKOUT_PATH "teardown-start.log") -Value "started"'
+      : 'echo "started" > "$PASEO_SOURCE_CHECKOUT_PATH/teardown-start.log"';
+    const failingTeardownCommand = isPlatform("win32")
+      ? 'Write-Error "boom"; exit 9'
+      : "echo boom 1>&2; exit 9";
     const { tempDir, repoDir } = createGitRepo({
       paseoConfig: {
         worktree: {
-          teardown: [
-            'echo "started" > "$PASEO_SOURCE_CHECKOUT_PATH/teardown-start.log"',
-            "echo boom 1>&2; exit 9",
-          ],
+          teardown: [teardownLogPath, failingTeardownCommand],
         },
       },
     });
