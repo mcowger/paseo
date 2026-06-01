@@ -24,6 +24,8 @@ If the branch is `main` or `master`, the branch segment is omitted:
 dev--feature-auth--miniweb.paseoapps.my.domain.com
 ```
 
+The public route uses one combined leftmost label (`script--branch--project`) rather than the local development shape (`script.branch.project.localhost`). This is intentional: dotted script/branch/project hostnames would require multi-level wildcard DNS and certificates for arbitrary branch names, while a single label works with normal `*.base-domain` DNS and wildcard TLS. If the combined label would exceed DNS's 63-character label limit, Paseo truncates it.
+
 ## Configuration
 
 Add a `serviceProxy` block under `daemon` in `~/.paseo/config.json`:
