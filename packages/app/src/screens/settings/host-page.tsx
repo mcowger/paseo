@@ -7,7 +7,7 @@ import { AdaptiveRenameModal } from "@/components/rename-modal";
 import { SettingsTextAreaCard } from "@/components/settings-textarea";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { stopDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import { startDesktopDaemon, stopDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { LocalDaemonSection } from "@/desktop/components/desktop-updates-section";
 import { useDaemonStatus } from "@/desktop/hooks/use-daemon-status";
 import { useDesktopSettings } from "@/desktop/settings/desktop-settings";
@@ -856,14 +856,41 @@ function RemoveHostSection({
     setIsConfirming(false);
   }, [isRemoving]);
   const handleCancel = useCallback(() => setIsConfirming(false), []);
+  const rollbackLocalhostRemoval = useCallback(
+    async (shouldRestartDaemon: boolean) => {
+      await updateSettings({ daemon: { manageBuiltInDaemon: true } });
+      if (!shouldRestartDaemon) {
+        return;
+      }
+      setStatus(await startDesktopDaemon());
+    },
+    [setStatus, updateSettings],
+  );
   const handleConfirmRemove = useCallback(() => {
     setIsRemoving(true);
     const remove = async () => {
+      let didDisableDaemonManagement = false;
+      let didStopDaemon = false;
       if (isLocalDaemon) {
-        await updateSettings({ daemon: { manageBuiltInDaemon: false } });
-        if (daemonStatus?.status === "running" && daemonStatus.desktopManaged) {
-          setStatus(await stopDesktopDaemon());
+        try {
+          await updateSettings({ daemon: { manageBuiltInDaemon: false } });
+          didDisableDaemonManagement = true;
+          if (daemonStatus?.status === "running" && daemonStatus.desktopManaged) {
+            setStatus(await stopDesktopDaemon());
+            didStopDaemon = true;
+          }
+          await removeHost(host.serverId);
+        } catch (error) {
+          if (didDisableDaemonManagement) {
+            try {
+              await rollbackLocalhostRemoval(didStopDaemon);
+            } catch (rollbackError) {
+              console.error("[HostPage] Failed to roll back localhost removal", rollbackError);
+            }
+          }
+          throw error;
         }
+        return;
       }
       await removeHost(host.serverId);
     };
@@ -887,6 +914,7 @@ function RemoveHostSection({
     isLocalDaemon,
     onRemoved,
     removeHost,
+    rollbackLocalhostRemoval,
     setStatus,
     updateSettings,
   ]);

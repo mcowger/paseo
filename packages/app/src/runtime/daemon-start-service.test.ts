@@ -247,4 +247,26 @@ describe("upsertDesktopDaemonConnection", () => {
     });
     expect(fake.upserts).toEqual([]);
   });
+
+  it("rejects a missing server id without upserting", async () => {
+    const fake = createFakeStore();
+
+    const result = await upsertDesktopDaemonConnection(fake.store, makeStatus({ serverId: "" }));
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Desktop daemon did not return a server id.",
+    });
+    expect(fake.upserts).toEqual([]);
+  });
+
+  it("rejects an unsupported listen address without upserting", async () => {
+    const fake = createFakeStore();
+
+    const result = await upsertDesktopDaemonConnection(fake.store, makeStatus({ listen: "???" }));
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.error).toContain("unsupported listen address");
+    expect(fake.upserts).toEqual([]);
+  });
 });

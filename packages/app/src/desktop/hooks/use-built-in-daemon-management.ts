@@ -17,6 +17,23 @@ import { confirmDialog } from "@/utils/confirm-dialog";
 
 type DesktopDaemonSettings = DesktopSettings["daemon"];
 
+class DaemonConnectionRegistrationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonConnectionRegistrationError";
+  }
+}
+
+function formatDaemonManagementErrorMessage(error: Error, isManagingDaemon: boolean): string {
+  if (error instanceof DaemonConnectionRegistrationError) {
+    return "Built-in daemon started, but Paseo could not save the localhost connection. Toggle daemon management off and on again, or add localhost manually.";
+  }
+  if (isManagingDaemon) {
+    return "Built-in daemon management was paused, but Paseo could not stop the daemon.";
+  }
+  return "Unable to update built-in daemon management.";
+}
+
 interface UseBuiltInDaemonManagementInput {
   daemonStatus: DesktopDaemonStatus | null;
   settings: DesktopDaemonSettings;
@@ -64,7 +81,7 @@ export function useBuiltInDaemonManagement(
           result.newStatus,
         );
         if (!upsertResult.ok) {
-          throw new Error(upsertResult.error);
+          throw new DaemonConnectionRegistrationError(upsertResult.error);
         }
       }
       return result;
@@ -72,9 +89,7 @@ export function useBuiltInDaemonManagement(
     onError: (error) => {
       reportError({
         error,
-        message: settings.manageBuiltInDaemon
-          ? "Built-in daemon management was paused, but Paseo could not stop the daemon."
-          : "Unable to update built-in daemon management.",
+        message: formatDaemonManagementErrorMessage(error, settings.manageBuiltInDaemon),
         logLabel: "[Settings] Failed to update built-in daemon management",
       });
     },
