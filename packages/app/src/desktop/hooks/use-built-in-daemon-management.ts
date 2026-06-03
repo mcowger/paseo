@@ -87,6 +87,9 @@ export function useBuiltInDaemonManagement(
       return result;
     },
     onError: (error) => {
+      if (error instanceof DaemonConnectionRegistrationError) {
+        refreshStatus();
+      }
       reportError({
         error,
         message: formatDaemonManagementErrorMessage(error, settings.manageBuiltInDaemon),
