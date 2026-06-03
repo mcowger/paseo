@@ -9,6 +9,10 @@ import {
   executeDaemonManagementToggle,
   type DaemonManagementToggleResult,
 } from "@/desktop/daemon/daemon-management-toggle";
+import {
+  DaemonConnectionRegistrationError,
+  getDaemonManagementErrorPresentation,
+} from "@/desktop/daemon/daemon-management-error";
 import { useDesktopIpcErrorReporter } from "@/desktop/hooks/desktop-ipc-error";
 import type { DesktopSettings } from "@/desktop/settings/desktop-settings";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
@@ -16,23 +20,6 @@ import { upsertDesktopDaemonConnection } from "@/runtime/daemon-start-service";
 import { confirmDialog } from "@/utils/confirm-dialog";
 
 type DesktopDaemonSettings = DesktopSettings["daemon"];
-
-class DaemonConnectionRegistrationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DaemonConnectionRegistrationError";
-  }
-}
-
-function formatDaemonManagementErrorMessage(error: Error, isManagingDaemon: boolean): string {
-  if (error instanceof DaemonConnectionRegistrationError) {
-    return "Built-in daemon started, but Paseo could not save the localhost connection. Toggle daemon management off and on again, or add localhost manually.";
-  }
-  if (isManagingDaemon) {
-    return "Built-in daemon management was paused, but Paseo could not stop the daemon.";
-  }
-  return "Unable to update built-in daemon management.";
-}
 
 interface UseBuiltInDaemonManagementInput {
   daemonStatus: DesktopDaemonStatus | null;
@@ -87,12 +74,16 @@ export function useBuiltInDaemonManagement(
       return result;
     },
     onError: (error) => {
-      if (error instanceof DaemonConnectionRegistrationError) {
+      const presentation = getDaemonManagementErrorPresentation(
+        error,
+        settings.manageBuiltInDaemon,
+      );
+      if (presentation.refreshStatus) {
         refreshStatus();
       }
       reportError({
         error,
-        message: formatDaemonManagementErrorMessage(error, settings.manageBuiltInDaemon),
+        message: presentation.message,
         logLabel: "[Settings] Failed to update built-in daemon management",
       });
     },

@@ -157,6 +157,24 @@ const HOST_SECTION_ITEMS: HostSectionItem[] = [
   { id: "host", label: "Host", icon: Server },
 ];
 
+function renderHostSettingsContent(
+  view: Extract<SettingsView, { kind: "host" }>,
+  onHostRemoved: () => void,
+): ReactNode {
+  switch (view.section) {
+    case "connections":
+      return <HostConnectionsPage serverId={view.serverId} />;
+    case "agents":
+      return <HostAgentsPage serverId={view.serverId} />;
+    case "workspaces":
+      return <HostWorkspacesPage serverId={view.serverId} />;
+    case "providers":
+      return <HostProvidersPage serverId={view.serverId} />;
+    case "host":
+      return <HostSettingsPage serverId={view.serverId} onHostRemoved={onHostRemoved} />;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Trigger + sidebar style helpers
 // ---------------------------------------------------------------------------
@@ -1327,18 +1345,7 @@ export default function SettingsScreen({ view }: SettingsScreenProps) {
 
   const content = (() => {
     if (view.kind === "host") {
-      switch (view.section) {
-        case "connections":
-          return <HostConnectionsPage serverId={view.serverId} />;
-        case "agents":
-          return <HostAgentsPage serverId={view.serverId} />;
-        case "workspaces":
-          return <HostWorkspacesPage serverId={view.serverId} />;
-        case "providers":
-          return <HostProvidersPage serverId={view.serverId} />;
-        case "host":
-          return <HostSettingsPage serverId={view.serverId} onHostRemoved={handleHostRemoved} />;
-      }
+      return renderHostSettingsContent(view, handleHostRemoved);
     }
     if (view.kind === "projects") {
       return <ProjectsScreen view={view} />;
