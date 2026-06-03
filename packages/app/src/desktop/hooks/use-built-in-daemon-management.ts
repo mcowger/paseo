@@ -11,6 +11,7 @@ import {
 } from "@/desktop/daemon/daemon-management-toggle";
 import {
   DaemonConnectionRegistrationError,
+  DaemonManagementOperationError,
   getDaemonManagementErrorPresentation,
 } from "@/desktop/daemon/daemon-management-error";
 import { useDesktopIpcErrorReporter } from "@/desktop/hooks/desktop-ipc-error";
@@ -44,10 +45,9 @@ export function useBuiltInDaemonManagement(
     Error
   >({
     mutationFn: async () => {
-      const result = await executeDaemonManagementToggle(
-        settings.manageBuiltInDaemon,
-        daemonStatus,
-        {
+      const wasManagingDaemon = settings.manageBuiltInDaemon;
+      try {
+        const result = await executeDaemonManagementToggle(wasManagingDaemon, daemonStatus, {
           confirm: () =>
             confirmDialog({
               title: "Pause built-in daemon",
@@ -60,18 +60,23 @@ export function useBuiltInDaemonManagement(
           persistSettings: (next) => updateSettings(next) as Promise<void>,
           startDaemon: startDesktopDaemon,
           stopDaemon: stopDesktopDaemon,
-        },
-      );
-      if (result.kind === "enabled") {
-        const upsertResult = await upsertDesktopDaemonConnection(
-          getHostRuntimeStore(),
-          result.newStatus,
-        );
-        if (!upsertResult.ok) {
-          throw new DaemonConnectionRegistrationError(upsertResult.error);
+        });
+        if (result.kind === "enabled") {
+          const upsertResult = await upsertDesktopDaemonConnection(
+            getHostRuntimeStore(),
+            result.newStatus,
+          );
+          if (!upsertResult.ok) {
+            throw new DaemonConnectionRegistrationError(upsertResult.error);
+          }
         }
+        return result;
+      } catch (error) {
+        throw new DaemonManagementOperationError(
+          error instanceof Error ? error : new Error(String(error)),
+          wasManagingDaemon,
+        );
       }
-      return result;
     },
     onError: (error) => {
       const presentation = getDaemonManagementErrorPresentation(

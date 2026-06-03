@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DaemonConnectionRegistrationError,
+  DaemonManagementOperationError,
   getDaemonManagementErrorPresentation,
 } from "./daemon-management-error";
 
@@ -20,6 +21,18 @@ describe("getDaemonManagementErrorPresentation", () => {
 
   it("does not refresh status for daemon stop failures", () => {
     const presentation = getDaemonManagementErrorPresentation(new Error("stop failed"), true);
+
+    expect(presentation).toEqual({
+      message: "Built-in daemon management was paused, but Paseo could not stop the daemon.",
+      refreshStatus: false,
+    });
+  });
+
+  it("uses the pre-mutation daemon management state for operation failures", () => {
+    const presentation = getDaemonManagementErrorPresentation(
+      new DaemonManagementOperationError(new Error("stop failed"), true),
+      false,
+    );
 
     expect(presentation).toEqual({
       message: "Built-in daemon management was paused, but Paseo could not stop the daemon.",
