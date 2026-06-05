@@ -117,7 +117,6 @@ import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
 import { useClearWorkspaceAttention } from "@/hooks/use-clear-workspace-attention";
 import type { PrHint } from "@/git/use-pr-status-query";
 import { buildSidebarProjectRowModel } from "@/utils/sidebar-project-row-model";
-import { useSessionStore } from "@/stores/session-store";
 import { redirectIfArchivingActiveWorkspace } from "@/utils/sidebar-workspace-archive-redirect";
 import { openExternalUrl } from "@/utils/open-external-url";
 import {
@@ -129,7 +128,12 @@ import {
   archiveWorkspaceOptimistically,
   archiveWorkspacesOptimistically,
 } from "@/workspace/workspace-archive";
-import { isWeb as platformIsWeb, isNative as platformIsNative } from "@/constants/platform";
+import {
+  isWeb as platformIsWeb,
+  isNative as platformIsNative,
+  getIsElectron,
+} from "@/constants/platform";
+import { getDesktopHost } from "@/desktop/host";
 
 const workspaceKeyExtractor = (workspace: SidebarWorkspaceEntry) => workspace.workspaceKey;
 
@@ -154,14 +158,24 @@ const ThemedCopy = withUnistyles(Copy);
 const ThemedArchive = withUnistyles(Archive);
 const ThemedPencil = withUnistyles(Pencil);
 
-const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
+const foregroundColorMapping = (theme: Theme) => ({
+  color: theme.colors.foreground,
+});
 const foregroundMutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
-const redColorMapping = (theme: Theme) => ({ color: theme.colors.palette.red[500] });
-const amberColorMapping = (theme: Theme) => ({ color: theme.colors.palette.amber[500] });
-const greenColorMapping = (theme: Theme) => ({ color: theme.colors.palette.green[500] });
-const purpleColorMapping = (theme: Theme) => ({ color: theme.colors.palette.purple[500] });
+const redColorMapping = (theme: Theme) => ({
+  color: theme.colors.palette.red[500],
+});
+const amberColorMapping = (theme: Theme) => ({
+  color: theme.colors.palette.amber[500],
+});
+const greenColorMapping = (theme: Theme) => ({
+  color: theme.colors.palette.green[500],
+});
+const purpleColorMapping = (theme: Theme) => ({
+  color: theme.colors.palette.purple[500],
+});
 const syncedLoaderColorMapping = (theme: Theme) => ({
   color:
     theme.colorScheme === "light"
@@ -516,6 +530,7 @@ function ProjectRowTrailingActions({
         >
           <ProjectKebabMenu
             projectKey={project.projectKey}
+            projectPath={project.iconWorkingDir}
             onRemoveProject={onRemoveProject}
             removeProjectStatus={removeProjectStatus}
           />
@@ -533,6 +548,9 @@ const markAsReadLeadingIcon = (
 );
 const archiveLeadingIcon = <ThemedArchive size={14} uniProps={foregroundMutedColorMapping} />;
 const renameLeadingIcon = <ThemedPencil size={14} uniProps={foregroundMutedColorMapping} />;
+const openInNewWindowLeadingIcon = (
+  <ThemedExternalLink size={14} uniProps={foregroundMutedColorMapping} />
+);
 
 function renderKebabTriggerIcon({ hovered }: { hovered?: boolean }) {
   return (
@@ -545,18 +563,35 @@ function renderKebabTriggerIcon({ hovered }: { hovered?: boolean }) {
 
 function ProjectKebabMenu({
   projectKey,
+  projectPath,
   onRemoveProject,
   removeProjectStatus,
 }: {
   projectKey: string;
+  projectPath: string;
   onRemoveProject: () => void;
   removeProjectStatus: "idle" | "pending" | "success";
 }) {
+  const toast = useToast();
   const handleOpenProjectSettings = useCallback(() => {
     if (projectKey.trim().length === 0) return;
     router.navigate(buildProjectSettingsRoute(projectKey));
   }, [projectKey]);
   const canOpenProjectSettings = projectKey.trim().length > 0;
+  // Desktop-only: open a second window that lands on this project via the same
+  // open-project flow as a CLI launch. The project stays visible here too — no
+  // ownership, no move.
+  const canOpenInNewWindow = getIsElectron() && projectPath.trim().length > 0;
+  const handleOpenInNewWindow = useCallback(() => {
+    const trimmedPath = projectPath.trim();
+    if (trimmedPath.length === 0) return;
+    void getDesktopHost()
+      ?.window?.openNew?.({ pendingOpenProjectPath: trimmedPath })
+      ?.catch((error) => {
+        console.warn("[sidebar] openNew failed", error);
+        toast.error("Couldn't open a new window");
+      });
+  }, [projectPath, toast]);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -576,6 +611,15 @@ function ProjectKebabMenu({
             onSelect={handleOpenProjectSettings}
           >
             Open project settings
+          </DropdownMenuItem>
+        ) : null}
+        {canOpenInNewWindow ? (
+          <DropdownMenuItem
+            testID={`sidebar-project-menu-open-new-window-${projectKey}`}
+            leading={openInNewWindowLeadingIcon}
+            onSelect={handleOpenInNewWindow}
+          >
+            Open in new window
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuItem
@@ -1172,17 +1216,14 @@ function ProjectHeaderRow({
     if (!serverId) {
       return;
     }
+    onWorkspacePress?.();
     router.navigate(
       buildHostNewWorkspaceRoute(serverId, project.iconWorkingDir, {
         displayName,
         projectId: project.projectKey,
       }) as Href,
     );
-    onWorkspacePress?.();
   }, [displayName, onWorkspacePress, project.iconWorkingDir, project.projectKey, serverId]);
-  const _mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
-  const _toast = useToast();
-
   const interaction = useLongPressDragInteraction({
     drag,
     menuController,
@@ -2402,7 +2443,10 @@ function SidebarStatusModeWrapper({
   shortcutIndexByWorkspaceKey: Map<string, number>;
   onWorkspacePress?: () => void;
 }) {
-  const hydratedWorkspaces = useStatusModeWorkspaceEntries({ serverId, projects });
+  const hydratedWorkspaces = useStatusModeWorkspaceEntries({
+    serverId,
+    projects,
+  });
   const projectNamesByKey = useProjectNamesMap(serverId);
   const showShortcutBadges = useShowShortcutBadges();
 
@@ -2463,7 +2507,10 @@ function ProjectModeList({
     [parentGestureRef],
   );
 
-  const projectIconByProjectKey = useProjectIconDataByProjectKey({ serverId, projects });
+  const projectIconByProjectKey = useProjectIconDataByProjectKey({
+    serverId,
+    projects,
+  });
 
   useEffect(() => {
     const timeouts = creatingWorkspaceTimeoutsRef.current;

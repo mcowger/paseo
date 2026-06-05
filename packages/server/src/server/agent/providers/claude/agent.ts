@@ -279,6 +279,7 @@ interface ClaudeAgentClientOptions {
   runtimeSettings?: ProviderRuntimeSettings;
   queryFactory?: ClaudeQueryFactory;
   resolveBinary?: () => Promise<string>;
+  configDir?: string;
 }
 
 interface ClaudeAgentSessionOptions {
@@ -799,7 +800,7 @@ function coerceSessionMetadata(metadata: AgentMetadata | undefined): Partial<Age
   return result;
 }
 
-function toClaudeSdkMcpConfig(config: McpServerConfig): ClaudeSdkMcpServerConfig {
+export function toClaudeSdkMcpConfig(config: McpServerConfig): ClaudeSdkMcpServerConfig {
   switch (config.type) {
     case "stdio":
       return {
@@ -807,18 +808,21 @@ function toClaudeSdkMcpConfig(config: McpServerConfig): ClaudeSdkMcpServerConfig
         command: config.command,
         args: config.args,
         env: config.env,
+        alwaysLoad: config.alwaysLoad,
       };
     case "http":
       return {
         type: "http",
         url: config.url,
         headers: config.headers,
+        alwaysLoad: config.alwaysLoad,
       };
     case "sse":
       return {
         type: "sse",
         url: config.url,
         headers: config.headers,
+        alwaysLoad: config.alwaysLoad,
       };
   }
   throw new Error("Unhandled MCP server config type");
@@ -1277,6 +1281,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
+  private readonly configDir?: string;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1284,6 +1289,7 @@ export class ClaudeAgentClient implements AgentClient {
     this.runtimeSettings = options.runtimeSettings;
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary ?? (() => resolveClaudeBinary(this.runtimeSettings));
+    this.configDir = options.configDir;
   }
 
   async createSession(
@@ -1334,7 +1340,7 @@ export class ClaudeAgentClient implements AgentClient {
 
   async listModels(_options: ListModelsOptions): Promise<AgentModelDefinition[]> {
     // Claude exposes a global catalog here; cwd/force are intentionally irrelevant.
-    return await getClaudeModelsWithSettings(this.logger);
+    return await getClaudeModelsWithSettings(this.logger, this.configDir);
   }
 
   async listFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
