@@ -606,9 +606,9 @@ export const fr: TranslationResources = {
           success: "Archivé",
         },
         mergePr: {
-          squash: "Fusionner",
-          merge: "Fusionner",
-          rebase: "Fusionner",
+          squash: "Fusionner PR (squash)",
+          merge: "Fusionner PR (merge)",
+          rebase: "Fusionner PR (rebase)",
           pending: "Fusion dePR...",
           success: "PRfusionné",
         },

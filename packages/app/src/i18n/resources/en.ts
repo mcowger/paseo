@@ -599,9 +599,9 @@ export const en = {
           success: "Archived",
         },
         mergePr: {
-          squash: "Merge",
-          merge: "Merge",
-          rebase: "Merge",
+          squash: "Merge PR (squash)",
+          merge: "Merge PR (merge)",
+          rebase: "Merge PR (rebase)",
           pending: "Merging PR...",
           success: "PR merged",
         },

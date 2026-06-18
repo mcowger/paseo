@@ -606,9 +606,9 @@ export const es: TranslationResources = {
           success: "Archivado",
         },
         mergePr: {
-          squash: "Fusionar",
-          merge: "Fusionar",
-          rebase: "Fusionar",
+          squash: "Fusionar PR (squash)",
+          merge: "Fusionar PR (merge)",
+          rebase: "Fusionar PR (rebase)",
           pending: "FusionandoPR...",
           success: "PRfusionado",
         },

@@ -605,9 +605,9 @@ export const ru: TranslationResources = {
           success: "В архиве",
         },
         mergePr: {
-          squash: "Объединить",
-          merge: "Объединить",
-          rebase: "Объединить",
+          squash: "Объединить PR (squash)",
+          merge: "Объединить PR (merge)",
+          rebase: "Объединить PR (rebase)",
           pending: "Объединение PR...",
           success: "PR объединен",
         },

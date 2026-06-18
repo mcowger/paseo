@@ -601,9 +601,9 @@ export const ar: TranslationResources = {
           success: "مؤرشف",
         },
         mergePr: {
-          squash: "دمج",
-          merge: "دمج",
-          rebase: "دمج",
+          squash: "دمج PR (squash)",
+          merge: "دمج PR (merge)",
+          rebase: "دمج PR (rebase)",
           pending: "دمج PR...",
           success: "تم دمج PR",
         },
