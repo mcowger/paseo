@@ -177,6 +177,9 @@ export function useSettings(): UseSettingsReturn {
       if (updates.workspaceTitleSource !== undefined) {
         appUpdates.workspaceTitleSource = updates.workspaceTitleSource;
       }
+      if (updates.autoExpandReasoning !== undefined) {
+        appUpdates.autoExpandReasoning = updates.autoExpandReasoning;
+      }
       const promises: Promise<void>[] = [];
       if (Object.keys(appUpdates).length > 0) {
         promises.push(appSettings.updateSettings(appUpdates));

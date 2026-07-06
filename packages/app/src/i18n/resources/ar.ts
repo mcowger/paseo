@@ -1457,6 +1457,10 @@ export const ar: TranslationResources = {
         description: "يتم الاحتفاظ بالخطوط في المخزن المؤقت الطرفي المدمج",
         accessibilityLabel: "خطوط التمرير Terminal",
       },
+      autoExpandReasoning: {
+        label: "عرض التفكير دائماً",
+        description: "إظهار تفكير الوكيل وخطوات الاستدلال بشكل كامل بشكل افتراضي",
+      },
       language: {
         label: "لغة",
         description: "لغة التطبيق",
