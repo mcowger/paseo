@@ -22,9 +22,34 @@ name: Maintain plus branch
 #
 # APPLE SIGNING / NOTARIZATION SECRETS
 # ------------------------------------
-# macOS artifacts are signed/notarized when these repository secrets exist:
-#   APPLE_CERTIFICATE           base64 or file URL accepted by electron-builder CSC_LINK
-#   APPLE_CERTIFICATE_PASSWORD  password for that Developer ID Application .p12
+# macOS artifacts are signed/notarized when these repository secrets exist.
+#
+# Developer ID signing certificate:
+#   1. Create or locate a "Developer ID Application" certificate in your Apple
+#      Developer account under Certificates, Identifiers & Profiles.  This is the
+#      certificate type Apple uses for macOS apps distributed outside the Mac App
+#      Store.
+#   2. On the Mac that owns the certificate private key, export the certificate +
+#      private key from Keychain Access/Xcode as a password-protected .p12.
+#   3. Base64 encode the .p12 and store it as APPLE_CERTIFICATE, and store the
+#      .p12 export password as APPLE_CERTIFICATE_PASSWORD. Example:
+#
+#        base64 -i DeveloperIDApplication.p12 | pbcopy
+#
+# App Store Connect API key for notarization:
+#   1. In App Store Connect, go to Users and Access -> Integrations/API ->
+#      App Store Connect API, create a Team key, and download AuthKey_<KEY_ID>.p8.
+#      Apple only lets you download the private .p8 once, so save it somewhere
+#      secure.
+#   2. Store the raw contents of AuthKey_<KEY_ID>.p8 as APPLE_API_KEY.
+#   3. Store the visible 10-character key id as APPLE_API_KEY_ID.
+#   4. Store the Issuer ID UUID from the same App Store Connect API keys page as
+#      APPLE_API_ISSUER.
+#   5. Store your Apple Developer Team ID as APPLE_TEAM_ID.
+#
+# Secrets consumed by this workflow:
+#   APPLE_CERTIFICATE           base64 .p12, or another CSC_LINK value accepted by electron-builder
+#   APPLE_CERTIFICATE_PASSWORD  password for the Developer ID Application .p12
 #   APPLE_API_KEY               contents of App Store Connect AuthKey_<KEY_ID>.p8
 #   APPLE_API_KEY_ID            10-character App Store Connect API key ID
 #   APPLE_API_ISSUER            App Store Connect issuer UUID
@@ -33,6 +58,14 @@ name: Maintain plus branch
 # Legacy Apple ID notarization is also wired for compatibility:
 #   APPLE_ID
 #   APPLE_PASSWORD              app-specific password
+#
+# BASELINE ACTION VERSIONS
+# ------------------------
+# Checked 2026-07-08 against official GitHub action releases:
+#   actions/checkout        v7.0.0
+#   actions/setup-node      v6.4.0
+#   actions/upload-artifact v7.0.1
+#
 #
 # MISE / CLI INSTALLATION NOTES
 # -----------------------------
@@ -239,13 +272,13 @@ jobs:
 
     steps:
       - name: Checkout generated plus branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ env.PLUS_BRANCH }}
           fetch-depth: 1
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -333,7 +366,7 @@ jobs:
 
       - name: Upload desktop artifacts
         id: upload_desktop
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: paseo-plus-desktop-${{ matrix.platform }}-${{ matrix.electron_arch }}-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}
           path: ${{ matrix.artifact_globs }}
@@ -370,13 +403,13 @@ jobs:
 
     steps:
       - name: Checkout generated plus branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ env.PLUS_BRANCH }}
           fetch-depth: 1
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -511,7 +544,7 @@ jobs:
 
       - name: Upload CLI/server npm package artifacts
         id: upload_cli
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: paseo-plus-cli-server-npm-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}
           path: artifacts/npm-packages/*
