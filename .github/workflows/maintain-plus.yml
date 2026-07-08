@@ -1,0 +1,121 @@
+name: Maintain plus branch
+
+on:
+  workflow_dispatch:
+
+  # Your fork won't receive upstream push events, so poll periodically.
+  schedule:
+    - cron: "17 */6 * * *"
+
+  # Rebuild when you update any branch in your fork, except the generated branch.
+  push:
+    branches-ignore:
+      - plus
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: maintain-plus
+  cancel-in-progress: true
+
+env:
+  UPSTREAM: getpaseo/paseo
+  PLUS_BRANCH: plus
+  INCLUDE_DRAFTS: "false"
+
+jobs:
+  rebuild-plus:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Rebuild plus from upstream + my open PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORK: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          DEFAULT_BRANCH="$(
+            gh repo view "$UPSTREAM" \
+              --json defaultBranchRef \
+              --jq '.defaultBranchRef.name'
+          )"
+
+          echo "Upstream: $UPSTREAM"
+          echo "Fork: $FORK"
+          echo "Owner: $OWNER"
+          echo "Base branch: $DEFAULT_BRANCH"
+          echo "Generated branch: $PLUS_BRANCH"
+
+          mkdir repo
+          cd repo
+
+          git init
+
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK}.git"
+
+          git fetch --no-tags --prune upstream \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/upstream/${DEFAULT_BRANCH}"
+
+          git fetch --no-tags --prune fork \
+            "+refs/heads/*:refs/remotes/fork/*"
+
+          git switch -c "$PLUS_BRANCH" "refs/remotes/upstream/${DEFAULT_BRANCH}"
+
+          gh pr list \
+            --repo "$UPSTREAM" \
+            --author "$OWNER" \
+            --state open \
+            --limit 100 \
+            --json number,title,headRefName,headRepositoryOwner,isDraft \
+            > /tmp/prs.json
+
+          jq -r \
+            --arg owner "$OWNER" \
+            --arg include "$INCLUDE_DRAFTS" \
+            '
+              .[]
+              | select(.headRepositoryOwner.login == $owner)
+              | select($include == "true" or (.isDraft | not))
+              | [.number, .headRefName, .title]
+              | @tsv
+            ' /tmp/prs.json > /tmp/prs.tsv
+
+          if [[ ! -s /tmp/prs.tsv ]]; then
+            echo "No open matching PRs. $PLUS_BRANCH will equal upstream/${DEFAULT_BRANCH}."
+          fi
+
+          while IFS=$'\t' read -r number branch title; do
+            echo "::group::Merging PR #${number}: ${branch} — ${title}"
+
+            if ! git rev-parse --verify --quiet "refs/remotes/fork/${branch}" >/dev/null; then
+              echo "::error::Could not find fork branch ${branch}"
+              exit 1
+            fi
+
+            git merge --no-edit --no-ff "refs/remotes/fork/${branch}"
+
+            echo "::endgroup::"
+          done < /tmp/prs.tsv
+
+          {
+            echo "## Maintained plus branch"
+            echo
+            echo "Base: ${UPSTREAM}@${DEFAULT_BRANCH}"
+            echo
+            if [[ -s /tmp/prs.tsv ]]; then
+              echo "Merged PR branches:"
+              awk -F '\t' '{ printf "- #%s `%s` — %s\n", $1, $2, $3 }' /tmp/prs.tsv
+            else
+              echo "No open matching PR branches were merged."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          git push --force-with-lease fork "HEAD:refs/heads/${PLUS_BRANCH}"
