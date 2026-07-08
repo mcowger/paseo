@@ -1,5 +1,56 @@
 name: Maintain plus branch
 
+# WHY THIS WORKFLOW EXISTS
+# ------------------------
+# This fork carries local/open PR work for weeks before upstream getpaseo/paseo
+# merges it.  Rather than manually maintaining a long-lived integration branch,
+# this workflow treats `plus` as generated output:
+#
+#   plus = latest upstream default branch + this fork owner's open non-draft PRs
+#
+# It then builds "out of band" install artifacts from that generated branch so the
+# fork owner can run their pending changes before upstream merges them.
+#
+# WHAT IT DOES
+# ------------
+# 1. Polls upstream, and also reacts to pushes in this fork.
+# 2. Rebuilds and force-pushes the generated `plus` branch.
+# 3. Builds desktop installers for macOS arm64, macOS x64, and Linux x64.
+# 4. Builds installable npm tarballs for the CLI/server workspace packages.
+# 5. Uploads artifacts and writes the exact download/install commands to the
+#    workflow summary.
+#
+# APPLE SIGNING / NOTARIZATION SECRETS
+# ------------------------------------
+# macOS artifacts are signed/notarized when these repository secrets exist:
+#   APPLE_CERTIFICATE           base64 or file URL accepted by electron-builder CSC_LINK
+#   APPLE_CERTIFICATE_PASSWORD  password for that Developer ID Application .p12
+#   APPLE_API_KEY               contents of App Store Connect AuthKey_<KEY_ID>.p8
+#   APPLE_API_KEY_ID            10-character App Store Connect API key ID
+#   APPLE_API_ISSUER            App Store Connect issuer UUID
+#   APPLE_TEAM_ID               Apple Developer Team ID
+#
+# Legacy Apple ID notarization is also wired for compatibility:
+#   APPLE_ID
+#   APPLE_PASSWORD              app-specific password
+#
+# MISE / CLI INSTALLATION NOTES
+# -----------------------------
+# Every run uploads a CLI/server artifact containing npm `.tgz` files and an
+# install script.  The workflow summary shows commands like:
+#
+#   gh run download <run-id> -R mcowger/paseo -n <cli-artifact-name> -D /tmp/paseo-plus
+#   npm install -g /tmp/paseo-plus/*.tgz
+#
+# mise's npm backend installs packages from an npm-compatible registry, e.g.:
+#
+#   mise use -g "npm:@getpaseo/cli@<plus-version>"
+#
+# That exact mise command only works if this out-of-band plus version is also
+# published to an npm registry you can read.  The artifact tarballs are still the
+# source of truth for this workflow; publishing is intentionally not enabled by
+# default to avoid accidentally pushing unofficial packages to public npm.
+
 on:
   workflow_dispatch:
 
@@ -29,6 +80,10 @@ env:
   PLUS_BRANCH: plus
   INCLUDE_DRAFTS: "false"
   DESKTOP_PACKAGE_PATH: packages/desktop
+  # Keep false unless you deliberately add an NPM_TOKEN with publish rights and
+  # want `mise use -g npm:@getpaseo/cli@<plus-version>` to work from a registry.
+  PUBLISH_PLUS_NPM: "false"
+  PLUS_NPM_TAG: plus
 
 jobs:
   rebuild-plus:
@@ -184,13 +239,13 @@ jobs:
 
     steps:
       - name: Checkout generated plus branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.PLUS_BRANCH }}
           fetch-depth: 1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -204,11 +259,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ github.token }}
 
       - name: Set plus package versions
+        id: plus_version
         env:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          node <<'NODE'
+          version="$(node <<'NODE'
           const fs = require('node:fs');
 
           const rootPackagePath = 'package.json';
@@ -221,8 +277,11 @@ jobs:
           const version = `${match[1]}.${match[2]}.${match[3]}-plus.${process.env.RUN_NUMBER}`;
           rootPackage.version = version;
           fs.writeFileSync(rootPackagePath, `${JSON.stringify(rootPackage, null, 2)}\n`);
-          console.log(`Set root version to ${version}`);
+          process.stdout.write(version);
           NODE
+          )"
+          echo "Set root version to ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
           npm run version:sync-internal
 
       - name: Install Linux packaging prerequisites
@@ -238,11 +297,26 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           PASEO_DESKTOP_SMOKE: "1"
         run: |
           set -euo pipefail
 
           build_args=(-- --publish never --${{ matrix.platform == 'macos' && 'mac' || 'linux' }} --${{ matrix.electron_arch }})
+
+          if [[ "${{ matrix.platform }}" == "macos" && -n "${APPLE_API_KEY_CONTENT:-}" ]]; then
+            if [[ -z "${APPLE_API_KEY_ID:-}" || -z "${APPLE_API_ISSUER:-}" ]]; then
+              echo "::error::APPLE_API_KEY is set, but APPLE_API_KEY_ID or APPLE_API_ISSUER is missing."
+              exit 1
+            fi
+            apple_api_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "${APPLE_API_KEY_CONTENT}" > "${apple_api_key_path}"
+            chmod 600 "${apple_api_key_path}"
+            export APPLE_API_KEY="${apple_api_key_path}"
+            echo "Using App Store Connect API key for macOS notarization."
+          fi
 
           if [[ "${{ matrix.platform }}" == "macos" && -z "${CSC_LINK:-}" ]]; then
             echo "No Apple signing certificate secret configured; building unsigned macOS artifact."
@@ -258,7 +332,8 @@ jobs:
         run: find "${DESKTOP_PACKAGE_PATH}/release" -maxdepth 1 -type f -print | sort
 
       - name: Upload desktop artifacts
-        uses: actions/upload-artifact@v4
+        id: upload_desktop
+        uses: actions/upload-artifact@v7
         with:
           name: paseo-plus-desktop-${{ matrix.platform }}-${{ matrix.electron_arch }}-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}
           path: ${{ matrix.artifact_globs }}
@@ -277,6 +352,8 @@ jobs:
             echo
             echo "\`paseo-plus-desktop-${{ matrix.platform }}-${{ matrix.electron_arch }}-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}\`"
             echo
+            echo "Artifact link: ${{ steps.upload_desktop.outputs.artifact-url }}"
+            echo
             if [[ "${{ matrix.platform }}" == "macos" ]]; then
               echo "If Apple signing secrets are not configured in this fork, this macOS artifact is unsigned."
             fi
@@ -293,13 +370,13 @@ jobs:
 
     steps:
       - name: Checkout generated plus branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.PLUS_BRANCH }}
           fetch-depth: 1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -313,11 +390,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ github.token }}
 
       - name: Set plus package versions
+        id: plus_version
         env:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          node <<'NODE'
+          version="$(node <<'NODE'
           const fs = require('node:fs');
 
           const rootPackagePath = 'package.json';
@@ -330,8 +408,11 @@ jobs:
           const version = `${match[1]}.${match[2]}.${match[3]}-plus.${process.env.RUN_NUMBER}`;
           rootPackage.version = version;
           fs.writeFileSync(rootPackagePath, `${JSON.stringify(rootPackage, null, 2)}\n`);
-          console.log(`Set root version to ${version}`);
+          process.stdout.write(version);
           NODE
+          )"
+          echo "Set root version to ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
           npm run version:sync-internal
 
       - name: Build CLI/server package outputs
@@ -361,35 +442,76 @@ jobs:
           SH
           chmod +x artifacts/npm-packages/install-cli-server.sh
 
-          cat > artifacts/npm-packages/INSTALL.md <<'MD'
+          cat > artifacts/npm-packages/INSTALL.md <<MD
           # Paseo plus CLI/server packages
 
-          These tarballs were built from the generated `plus` branch.
+          These tarballs were built from the generated \`plus\` branch.
+
+          Plus package version:
+
+          \`\`\`text
+          ${{ steps.plus_version.outputs.version }}
+          \`\`\`
 
           To install the CLI and its local plus-version server dependencies:
 
-          ```bash
+          \`\`\`bash
           ./install-cli-server.sh
-          ```
+          \`\`\`
 
           Or manually:
 
-          ```bash
+          \`\`\`bash
           npm install -g ./*.tgz
-          ```
+          \`\`\`
 
           The installed CLI binary is:
 
-          ```bash
+          \`\`\`bash
           paseo
-          ```
+          \`\`\`
+
+          ## mise
+
+          mise can install npm tools from an npm-compatible registry. If this same
+          plus version has been published to a registry that your npm config can read:
+
+          \`\`\`bash
+          mise use -g "npm:@getpaseo/cli@${{ steps.plus_version.outputs.version }}"
+          \`\`\`
+
+          The GitHub Actions artifact itself is a bundle of local tarballs, so the
+          artifact install path is still \`npm install -g ./*.tgz\`.
           MD
 
       - name: List packed CLI/server artifacts
         run: find artifacts/npm-packages -maxdepth 1 -type f -print | sort
 
+      - name: Optionally publish plus packages to npm
+        if: ${{ env.PUBLISH_PLUS_NPM == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "::error::PUBLISH_PLUS_NPM=true but the NPM_TOKEN secret is empty/missing."
+            exit 1
+          fi
+          npm config set registry "https://registry.npmjs.org/"
+          npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
+          for workspace in \
+            @getpaseo/highlight \
+            @getpaseo/relay \
+            @getpaseo/protocol \
+            @getpaseo/client \
+            @getpaseo/server \
+            @getpaseo/cli; do
+            npm publish --workspace="$workspace" --access public --tag "$PLUS_NPM_TAG"
+          done
+
       - name: Upload CLI/server npm package artifacts
-        uses: actions/upload-artifact@v4
+        id: upload_cli
+        uses: actions/upload-artifact@v7
         with:
           name: paseo-plus-cli-server-npm-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}
           path: artifacts/npm-packages/*
@@ -408,7 +530,86 @@ jobs:
             echo
             echo "\`paseo-plus-cli-server-npm-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}\`"
             echo
-            echo "Install from the extracted artifact directory with:"
+            echo "Artifact link: ${{ steps.upload_cli.outputs.artifact-url }}"
             echo
-            echo "\`./install-cli-server.sh\`"
+            echo "Plus package version: \`${{ steps.plus_version.outputs.version }}\`"
+            echo
+            echo "Download and install with GitHub CLI:"
+            echo
+            echo "```bash"
+            echo "gh run download ${{ github.run_id }} -R ${{ github.repository }} -n 'paseo-plus-cli-server-npm-${{ github.run_number }}-${{ needs.rebuild-plus.outputs.plus_sha }}' -D /tmp/paseo-plus-cli"
+            echo "npm install -g /tmp/paseo-plus-cli/*.tgz"
+            echo "paseo --version"
+            echo "```"
+            echo
+            echo "mise command if this plus version is also published to an npm registry:"
+            echo
+            echo "```bash"
+            echo "mise use -g 'npm:@getpaseo/cli@${{ steps.plus_version.outputs.version }}'"
+            echo "```"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  summarize-plus-installation:
+    name: Summarize plus artifact install commands
+    needs:
+      - rebuild-plus
+      - build-desktop-artifacts
+      - build-cli-server-artifacts
+    if: ${{ always() && (needs.rebuild-plus.outputs.plus_changed == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Write final artifact and install summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLUS_SHA: ${{ needs.rebuild-plus.outputs.plus_sha }}
+        run: |
+          set -euo pipefail
+
+          echo "## Plus install summary" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Generated branch: \`${PLUS_BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Generated SHA: \`${PLUS_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
+
+          root_package_json="$(gh api "repos/${GITHUB_REPOSITORY}/contents/package.json?ref=${PLUS_BRANCH}" --jq '.content' | base64 -d)"
+          base_version="$(jq -r '.version' <<<"${root_package_json}")"
+          plus_version="$(node -e 'const [M,m,p] = process.argv[1].match(/^(\d+)\.(\d+)\.(\d+)/).slice(1); console.log(`${M}.${m}.${p}-plus.${process.env.GITHUB_RUN_NUMBER}`)' "${base_version}")"
+          echo "Plus package version: \`${plus_version}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --paginate \
+            --jq '.artifacts[] | select(.expired == false) | [.id, .name] | @tsv' > /tmp/artifacts.tsv
+
+          if [[ ! -s /tmp/artifacts.tsv ]]; then
+            echo "No artifacts were found for this run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          while IFS=$'\t' read -r id name; do
+            echo "- [${name}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${id})" >> "$GITHUB_STEP_SUMMARY"
+          done < /tmp/artifacts.tsv
+          echo >> "$GITHUB_STEP_SUMMARY"
+
+          cli_artifact="$(awk -F '\t' '$2 ~ /^paseo-plus-cli-server-npm-/ { print $2; exit }' /tmp/artifacts.tsv || true)"
+          if [[ -n "${cli_artifact}" ]]; then
+            echo "### CLI/server install" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+            echo "gh run download ${GITHUB_RUN_ID} -R ${GITHUB_REPOSITORY} -n '${cli_artifact}' -D /tmp/paseo-plus-cli" >> "$GITHUB_STEP_SUMMARY"
+            echo "npm install -g /tmp/paseo-plus-cli/*.tgz" >> "$GITHUB_STEP_SUMMARY"
+            echo "paseo --version" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "If you enable npm publishing for plus versions, the equivalent mise shape is:" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+            echo "mise use -g 'npm:@getpaseo/cli@${plus_version}'" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
