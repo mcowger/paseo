@@ -15,7 +15,7 @@ name: Maintain plus branch
 # ------------
 # 1. Polls upstream, and also reacts to pushes in this fork.
 # 2. Rebuilds and force-pushes the generated `plus` branch.
-# 3. Builds desktop installers for macOS arm64, macOS x64, and Linux x64.
+# 3. Builds desktop installers for macOS arm64 and macOS x64.
 # 4. Builds installable npm tarballs for the CLI/server workspace packages.
 # 5. Uploads artifacts and writes the exact download/install commands to the
 #    workflow summary.
@@ -257,14 +257,11 @@ jobs:
             artifact_globs: |
               packages/desktop/release/*.dmg
               packages/desktop/release/*.zip
-          - platform: linux
-            runner: ubuntu-22.04
-            electron_arch: x64
-            artifact_globs: |
-              packages/desktop/release/*.AppImage
-              packages/desktop/release/*.deb
-              packages/desktop/release/*.rpm
-              packages/desktop/release/*.tar.gz
+          # Linux desktop packaging is intentionally disabled for now to save
+          # Actions minutes and because the fork owner currently only consumes
+          # macOS desktop artifacts plus CLI/server npm tarballs. To re-enable,
+          # add back a linux matrix entry here and restore the Linux packaging
+          # prerequisite step below.
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -317,10 +314,6 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           npm run version:sync-internal
 
-      - name: Install Linux packaging prerequisites
-        if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb rpm
-
       - name: Build desktop artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -337,7 +330,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          build_args=(-- --publish never --${{ matrix.platform == 'macos' && 'mac' || 'linux' }} --${{ matrix.electron_arch }})
+          build_args=(-- --publish never --mac --${{ matrix.electron_arch }})
 
           if [[ "${{ matrix.platform }}" == "macos" && -n "${APPLE_API_KEY_CONTENT:-}" ]]; then
             if [[ -z "${APPLE_API_KEY_ID:-}" || -z "${APPLE_API_ISSUER:-}" ]]; then
