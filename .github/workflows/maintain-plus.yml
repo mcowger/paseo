@@ -627,7 +627,7 @@ jobs:
             packages/client \
             packages/server \
             packages/cli; do
-            npm publish "$package_dir" --tag "$PLUS_NPM_TAG" --ignore-scripts
+            npm publish "./$package_dir" --tag "$PLUS_NPM_TAG" --ignore-scripts
           done
 
           {
