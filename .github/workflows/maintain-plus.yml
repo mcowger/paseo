@@ -15,7 +15,8 @@ name: Maintain plus branch
 # ------------
 # 1. Polls upstream, and also reacts to pushes in this fork.
 # 2. Rebuilds and force-pushes the generated `plus` branch.
-# 3. Builds desktop installers for macOS arm64 and macOS x64.
+# 3. Builds a desktop installer for macOS arm64 only. macOS x64 is intentionally
+#    disabled for now to save Actions minutes.
 # 4. Builds installable npm tarballs for the CLI/server workspace packages.
 # 5. Publishes CLI/server packages to this fork's GitHub Packages namespace so
 #    mise can install them as normal npm-backed tools.
@@ -259,17 +260,11 @@ jobs:
             artifact_globs: |
               packages/desktop/release/*.dmg
               packages/desktop/release/*.zip
-          - platform: macos
-            runner: macos-15-intel
-            electron_arch: x64
-            artifact_globs: |
-              packages/desktop/release/*.dmg
-              packages/desktop/release/*.zip
-          # Linux desktop packaging is intentionally disabled for now to save
-          # Actions minutes and because the fork owner currently only consumes
-          # macOS desktop artifacts plus CLI/server npm tarballs. To re-enable,
-          # add back a linux matrix entry here and restore the Linux packaging
-          # prerequisite step below.
+          # macOS x64 and Linux desktop packaging are intentionally disabled for
+          # now to save Actions minutes. The fork owner currently consumes only
+          # macOS arm64 desktop artifacts plus CLI/server npm packages. To
+          # re-enable another desktop target, add another matrix entry here and
+          # restore any platform-specific prerequisite steps below.
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
