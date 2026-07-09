@@ -678,10 +678,11 @@ jobs:
             echo "paseo --version"
             echo "```"
             echo
-            echo "mise command if this plus version is also published to an npm registry:"
+            echo "mise command for the GitHub Packages-published plus CLI:"
             echo
             echo "```bash"
-            echo "mise use -g 'npm:@getpaseo/cli@${{ steps.plus_version.outputs.version }}'"
+            echo "printf '@${{ github.repository_owner }}:registry=https://npm.pkg.github.com\\n//npm.pkg.github.com/:_authToken=YOUR_PAT_WITH_READ_PACKAGES\\n' >> ~/.npmrc"
+            echo "mise use -g 'npm:@${{ github.repository_owner }}/paseo-cli@${{ steps.plus_version.outputs.version }}'"
             echo "```"
           } >> "$GITHUB_STEP_SUMMARY"
 
