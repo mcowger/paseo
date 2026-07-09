@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -13,8 +13,8 @@ import {
 import { streamSession } from "./test-utils/session-stream-adapter.js";
 import {
   TestOpenCodeClient,
-  TestOpenCodeRuntime,
-} from "./opencode/test-utils/test-opencode-runtime.js";
+  TestOpenCodeHarness,
+} from "./opencode/test-utils/test-opencode-harness.js";
 import type {
   AgentSessionConfig,
   AgentStreamEvent,
@@ -112,6 +112,66 @@ function assistantTurnEvents({
   ];
 }
 
+function manualCompactEvents({
+  sessionId = "session-1",
+  summaryText = "## Goal\n- Preserve context while continuing the task.",
+}: {
+  sessionId?: string;
+  summaryText?: string;
+} = {}): OpenCodeEvent[] {
+  return [
+    {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg_compact_user",
+          sessionID: sessionId,
+          role: "user",
+        },
+      },
+    },
+    {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt_compact",
+          sessionID: sessionId,
+          messageID: "msg_compact_user",
+          type: "compaction",
+          auto: false,
+        },
+      },
+    },
+    {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg_compact_summary",
+          sessionID: sessionId,
+          role: "assistant",
+          providerID: "test-provider",
+          modelID: "gpt-5.5",
+        },
+      },
+    },
+    {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt_compact_summary",
+          sessionID: sessionId,
+          messageID: "msg_compact_summary",
+          type: "text",
+          text: summaryText,
+          time: { start: 1, end: 2 },
+        },
+      },
+    },
+    { type: "session.compacted", properties: { sessionID: sessionId } },
+    { type: "session.idle", properties: { sessionID: sessionId } },
+  ];
+}
+
 describe("OpenCodeAgentClient adapter smoke tests", () => {
   const logger = createTestLogger();
   const buildConfig = (cwd: string): AgentSessionConfig => ({
@@ -122,9 +182,12 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
 
   test("creates a session with valid id and provider", async () => {
     const cwd = tmpCwd();
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     runtime.enqueueClient(new TestOpenCodeClient());
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession(buildConfig(cwd));
 
     expect(typeof session.id).toBe("string");
@@ -137,11 +200,14 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
 
   test("single turn completes with streaming deltas", async () => {
     const cwd = tmpCwd();
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     openCodeClient.sessionPromptAsyncEvents = assistantTurnEvents();
     runtime.enqueueClient(openCodeClient);
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession(buildConfig(cwd));
 
     const iterator = streamSession(session, "Say hello");
@@ -168,8 +234,46 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     rmSync(cwd, { recursive: true, force: true });
   }, 120_000);
 
-  test("listModels returns models with required fields", async () => {
-    const runtime = new TestOpenCodeRuntime();
+  test("manual compact hides the generated summary text", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionSummarizeEvents = manualCompactEvents();
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd,
+      model: "test-provider/gpt-5.5",
+    });
+
+    const turn = await collectTurnEvents(streamSession(session, "/compact"));
+
+    expect(turn.turnCompleted).toBe(true);
+    expect(turn.assistantMessages).toEqual([]);
+    expect(turn.allTimelineItems).toEqual([
+      { type: "user_message", text: "/compact", messageId: "msg_compact_user" },
+      { type: "compaction", status: "loading", trigger: "manual" },
+      { type: "compaction", status: "completed" },
+    ]);
+    expect(openCodeClient.calls.sessionSummarize).toEqual([
+      expect.objectContaining({
+        sessionID: "session-1",
+        directory: cwd,
+        providerID: "test-provider",
+        modelID: "gpt-5.5",
+      }),
+    ]);
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }, 120_000);
+
+  test("fetchCatalog returns models with required fields", async () => {
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     openCodeClient.providerListResponse = {
       data: {
@@ -191,15 +295,29 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
         ],
       },
     };
+    openCodeClient.appAgentsResponse = {
+      data: [
+        {
+          name: "build",
+          mode: "primary",
+          hidden: false,
+        },
+      ],
+    };
     runtime.enqueueClient(openCodeClient);
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
-    const cwd = os.homedir();
-    const models = await client.listModels({ cwd, force: false });
+    const paseoHome = tmpCwd();
+    const opencodeHome = path.join(paseoHome, "opencode-home");
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+      resolveHomeDir: () => opencodeHome,
+    });
+    const catalog = await client.fetchCatalog({ scope: "global", force: false });
 
-    expect(Array.isArray(models)).toBe(true);
-    expect(models).toHaveLength(1);
+    expect(Array.isArray(catalog.models)).toBe(true);
+    expect(catalog.models).toHaveLength(1);
 
-    for (const model of models) {
+    for (const model of catalog.models) {
       expect(model.provider).toBe("opencode");
       expect(typeof model.id).toBe("string");
       expect(model.id.length).toBeGreaterThan(0);
@@ -214,7 +332,7 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
       });
       expect(typeof model.metadata?.contextWindowMaxTokens).toBe("number");
     }
-    expect(models[0]).toMatchObject({
+    expect(catalog.models[0]).toMatchObject({
       id: TEST_MODEL,
       label: "Big Pickle",
       metadata: {
@@ -223,11 +341,48 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
         contextWindowMaxTokens: 200_000,
       },
     });
-    expect(openCodeClient.calls.providerList).toEqual([{ directory: cwd }]);
+    expect(openCodeClient.calls.providerList).toEqual([{ directory: opencodeHome }]);
+    rmSync(paseoHome, { recursive: true, force: true });
   }, 60_000);
 
+  test("fetchCatalog releases the acquired server when opencode-home cannot be created", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const paseoHome = tmpCwd();
+    const opencodeHome = path.join(paseoHome, "opencode-home");
+    writeFileSync(opencodeHome, "not a directory");
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+      resolveHomeDir: () => opencodeHome,
+    });
+
+    await expect(client.fetchCatalog({ scope: "global", force: false })).rejects.toThrow();
+
+    expect(runtime.acquisitions).toEqual([{ kind: "current", releaseCount: 1 }]);
+    expect(runtime.clientCreations).toEqual([]);
+    rmSync(paseoHome, { recursive: true, force: true });
+  });
+
+  test("fetchCatalog releases the acquired server when opencode-home cannot be resolved", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+      resolveHomeDir: () => {
+        throw new Error("cannot resolve opencode-home");
+      },
+    });
+
+    await expect(client.fetchCatalog({ scope: "global", force: false })).rejects.toThrow(
+      "cannot resolve opencode-home",
+    );
+
+    expect(runtime.acquisitions).toEqual([{ kind: "current", releaseCount: 1 }]);
+    expect(runtime.clientCreations).toEqual([]);
+  });
+
   test("limits concurrent OpenCode metadata requests across clients", async () => {
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     let activeProviderListCalls = 0;
     let maxActiveProviderListCalls = 0;
     const response = {
@@ -260,10 +415,17 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
       runtime.enqueueClient(openCodeClient);
     }
 
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     await Promise.all(
       Array.from({ length: 12 }, (_, index) =>
-        client.listModels({ cwd: path.join(os.tmpdir(), `opencode-cwd-${index}`), force: false }),
+        client.fetchCatalog({
+          scope: "workspace",
+          cwd: path.join(os.tmpdir(), `opencode-cwd-${index}`),
+          force: false,
+        }),
       ),
     );
 
@@ -272,9 +434,12 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
 
   test("available modes include build and plan", async () => {
     const cwd = tmpCwd();
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     runtime.enqueueClient(new TestOpenCodeClient());
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession(buildConfig(cwd));
 
     const modes = await session.getAvailableModes();
@@ -288,7 +453,7 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
 
   test("custom agents defined in opencode.json appear in available modes", async () => {
     const cwd = tmpCwd();
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     openCodeClient.appAgentsResponse = {
       data: [
@@ -304,13 +469,15 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     };
     runtime.enqueueClient(openCodeClient);
 
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession(buildConfig(cwd));
 
     const modes = await session.getAvailableModes();
 
-    expect(modes.some((mode) => mode.id === "build")).toBe(true);
-    expect(modes.some((mode) => mode.id === "plan")).toBe(true);
+    expect(modes.map((mode) => mode.id)).toEqual(["paseo-test-custom"]);
 
     const custom = modes.find((mode) => mode.id === "paseo-test-custom");
     expect(custom).toBeDefined();
@@ -328,7 +495,7 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
 
   test("plan and build modes are sent to OpenCode as distinct runtime agents", async () => {
     const cwd = tmpCwd();
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     const planOpenCodeClient = new TestOpenCodeClient();
     planOpenCodeClient.sessionPromptAsyncEvents = assistantTurnEvents({ text: "Plan response" });
     const buildOpenCodeClient = new TestOpenCodeClient();
@@ -365,7 +532,10 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     ];
     runtime.enqueueClient(planOpenCodeClient);
     runtime.enqueueClient(buildOpenCodeClient);
-    const client = new OpenCodeAgentClient(logger, undefined, { runtime });
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
 
     const planSession = await client.createSession({
       ...buildConfig(cwd),
@@ -758,11 +928,14 @@ describe("OpenCode adapter context-window normalization", () => {
 
 describe("OpenCode adapter startTurn error handling", () => {
   test("dynamically adds injected MCP servers without config-backed connect", async () => {
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     runtime.enqueueClient(openCodeClient);
     const cwd = tmpCwd();
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, { runtime });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
 
     try {
       const session = await client.createSession({
@@ -798,7 +971,7 @@ describe("OpenCode adapter startTurn error handling", () => {
   });
 
   test("fails the turn when OpenCode reports MCP add failure in data payload", async () => {
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     openCodeClient.mcpAddResponse = {
       data: {
@@ -810,7 +983,10 @@ describe("OpenCode adapter startTurn error handling", () => {
     };
     runtime.enqueueClient(openCodeClient);
     const cwd = tmpCwd();
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, { runtime });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
 
     try {
       const session = await client.createSession({
@@ -1562,11 +1738,14 @@ describe("OpenCode adapter startTurn error handling", () => {
 
 describe("OpenCodeAgentClient env", () => {
   test("passes launch-context env to env-specific server acquisition", async () => {
-    const runtime = new TestOpenCodeRuntime();
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     runtime.enqueueClient(openCodeClient);
     const cwd = tmpCwd();
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, { runtime });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
 
     try {
       const session = await client.createSession(
@@ -1583,7 +1762,7 @@ describe("OpenCodeAgentClient env", () => {
       await session.close();
 
       expect(runtime.acquisitions[0]).toMatchObject({
-        force: false,
+        kind: "dedicated",
         env: {
           CHUNK14_PROBE: "expected",
         },
@@ -1595,8 +1774,157 @@ describe("OpenCodeAgentClient env", () => {
 });
 
 describe("OpenCode persisted sessions", () => {
-  test("listPersistedAgents returns only sessions whose cwd matches the requested cwd", async () => {
-    const runtime = new TestOpenCodeRuntime();
+  test("replay hides summaries produced by manual compact", () => {
+    const timeline = __openCodeInternals.buildOpenCodeSessionTimeline([
+      {
+        info: {
+          id: "msg_compact_user",
+          sessionID: "ses_1",
+          role: "user",
+          time: { created: 1000 },
+          agent: "build",
+          model: { providerID: "test-provider", modelID: "gpt-5.5" },
+        },
+        parts: [
+          {
+            id: "prt_compact_text",
+            sessionID: "ses_1",
+            messageID: "msg_compact_user",
+            type: "text",
+            text: "/compact",
+          },
+          {
+            id: "prt_compact",
+            sessionID: "ses_1",
+            messageID: "msg_compact_user",
+            type: "compaction",
+            auto: false,
+          },
+        ],
+      },
+      {
+        info: {
+          id: "msg_compact_summary",
+          sessionID: "ses_1",
+          role: "assistant",
+          time: { created: 1001, completed: 1002 },
+          providerID: "test-provider",
+          modelID: "gpt-5.5",
+        },
+        parts: [
+          {
+            id: "prt_summary",
+            sessionID: "ses_1",
+            messageID: "msg_compact_summary",
+            type: "text",
+            text: "## Goal\n- Preserve context while continuing the task.",
+          },
+        ],
+      },
+      {
+        info: {
+          id: "msg_next_user",
+          sessionID: "ses_1",
+          role: "user",
+          time: { created: 1003 },
+          agent: "build",
+          model: { providerID: "test-provider", modelID: "gpt-5.5" },
+        },
+        parts: [
+          {
+            id: "prt_next_user",
+            sessionID: "ses_1",
+            messageID: "msg_next_user",
+            type: "text",
+            text: "continue",
+          },
+        ],
+      },
+    ]);
+
+    expect(timeline).toEqual([
+      { type: "user_message", text: "/compact", messageId: "msg_compact_user" },
+      { type: "compaction", status: "completed", trigger: "manual" },
+      { type: "user_message", text: "continue", messageId: "msg_next_user" },
+    ]);
+  });
+
+  test("replay suppresses OpenCode compaction summary messages", () => {
+    const timeline = __openCodeInternals.buildOpenCodeSessionTimeline([
+      {
+        info: {
+          id: "msg_compaction_user",
+          sessionID: "ses_1",
+          role: "user",
+          time: { created: 1000 },
+          agent: "build",
+          model: { providerID: "opencode", modelID: "big-pickle" },
+        },
+        parts: [
+          {
+            id: "prt_compaction",
+            sessionID: "ses_1",
+            messageID: "msg_compaction_user",
+            type: "compaction",
+            auto: true,
+          },
+        ],
+      },
+      {
+        info: {
+          id: "msg_compaction_summary",
+          sessionID: "ses_1",
+          role: "assistant",
+          time: { created: 1001, completed: 1002 },
+          parentID: "msg_compaction_user",
+          providerID: "opencode",
+          modelID: "big-pickle",
+          mode: "compaction",
+          agent: "compaction",
+          path: { cwd: "/workspace/repo", root: "/workspace/repo" },
+          summary: true,
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [
+          {
+            id: "prt_summary",
+            sessionID: "ses_1",
+            messageID: "msg_compaction_summary",
+            type: "text",
+            text: "## Goal\n- Preserve context while continuing the task.",
+          },
+        ],
+      },
+      {
+        info: {
+          id: "msg_user_after_compaction",
+          sessionID: "ses_1",
+          role: "user",
+          time: { created: 1003 },
+          agent: "build",
+          model: { providerID: "opencode", modelID: "big-pickle" },
+        },
+        parts: [
+          {
+            id: "prt_user_after_compaction",
+            sessionID: "ses_1",
+            messageID: "msg_user_after_compaction",
+            type: "text",
+            text: "/create-pr",
+          },
+        ],
+      },
+    ]);
+
+    expect(timeline).toEqual([
+      { type: "compaction", status: "completed", trigger: "auto" },
+      { type: "user_message", text: "/create-pr", messageId: "msg_user_after_compaction" },
+    ]);
+  });
+
+  test("listImportableSessions returns rows without hydrating session messages", async () => {
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     const cwd = "/workspace/repo";
     const otherCwd = "/workspace/other";
@@ -1693,47 +2021,109 @@ describe("OpenCode persisted sessions", () => {
     };
     runtime.enqueueClient(openCodeClient);
 
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, { runtime });
-    const descriptors = await client.listPersistedAgents({ cwd, limit: 1 });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const sessions = await client.listImportableSessions({ cwd, limit: 1 });
 
-    expect(descriptors).toHaveLength(1);
-    expect(descriptors[0]).toMatchObject({
-      provider: "opencode",
-      sessionId: "ses_new",
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      providerHandleId: "ses_new",
       cwd,
       title: "New session",
-      persistence: {
-        provider: "opencode",
-        sessionId: "ses_new",
-        nativeHandle: "ses_new",
-        metadata: {
-          modeId: "build",
-          model: "opencode/big-pickle",
-        },
-      },
+      firstPromptPreview: null,
+      lastPromptPreview: null,
     });
-    expect(descriptors[0]?.lastActivityAt.toISOString()).toBe("1970-01-01T00:00:03.000Z");
-    expect(descriptors[0]?.timeline).toEqual([
-      { type: "user_message", text: "hello world", messageId: "msg_user" },
-      { type: "reasoning", text: "thinking clearly" },
-      expect.objectContaining({
-        type: "tool_call",
-        callId: "call_shell",
-        status: "completed",
-      }),
-      { type: "assistant_message", text: "hello back" },
-    ]);
+    expect(sessions[0]?.lastActivityAt.toISOString()).toBe("1970-01-01T00:00:03.000Z");
     expect(runtime.clientCreations).toEqual([{ baseUrl: runtime.server.url, directory: cwd }]);
     expect(openCodeClient.calls.experimentalSessionList).toEqual([
       { archived: true, roots: true, limit: 200 },
     ]);
-    expect(openCodeClient.calls.sessionMessages).toEqual([
-      { sessionID: "ses_new", directory: cwd },
+    expect(openCodeClient.calls.sessionMessages).toEqual([]);
+  });
+
+  test("importSession reads only the selected OpenCode session without listing", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const metadataClient = new TestOpenCodeClient();
+    const resumedClient = new TestOpenCodeClient();
+    const cwd = "/workspace/repo";
+    const selectedSession = {
+      id: "ses_selected",
+      directory: cwd,
+      title: "Selected session",
+      time: { created: 2000, updated: 3000 },
+    };
+    const messages = [
+      {
+        info: {
+          id: "msg_user",
+          sessionID: "ses_selected",
+          role: "user",
+          time: { created: 2100 },
+          agent: "build",
+          model: { providerID: "opencode", modelID: "big-pickle" },
+        },
+        parts: [
+          {
+            id: "prt_user",
+            sessionID: "ses_selected",
+            messageID: "msg_user",
+            type: "text",
+            text: "import only this session",
+            time: { start: 2100 },
+          },
+        ],
+      },
+    ];
+    metadataClient.sessionGetResponse = { data: selectedSession };
+    metadataClient.sessionMessagesResponse = { data: messages };
+    resumedClient.sessionGetResponse = { data: selectedSession };
+    resumedClient.sessionMessagesResponse = { data: messages };
+    runtime.enqueueClient(metadataClient);
+    runtime.enqueueClient(resumedClient);
+
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const imported = await client.importSession(
+      { providerHandleId: "ses_selected", cwd },
+      {
+        config: { provider: "opencode", cwd },
+        storedConfig: { provider: "opencode", cwd },
+      },
+    );
+
+    expect(metadataClient.calls.experimentalSessionList).toEqual([]);
+    expect(metadataClient.calls.sessionGet).toEqual([
+      { sessionID: "ses_selected", directory: cwd },
+    ]);
+    expect(metadataClient.calls.sessionMessages).toEqual([
+      { sessionID: "ses_selected", directory: cwd },
+    ]);
+    expect(imported.config).toMatchObject({
+      provider: "opencode",
+      cwd,
+      title: "Selected session",
+      modeId: "build",
+      model: "opencode/big-pickle",
+    });
+    expect(imported.persistence).toMatchObject({
+      provider: "opencode",
+      sessionId: "ses_selected",
+      nativeHandle: "ses_selected",
+    });
+    expect(imported.timeline.map((entry) => entry.item)).toEqual([
+      { type: "user_message", text: "import only this session", messageId: "msg_user" },
+    ]);
+    expect(resumedClient.calls.sessionMessages).toEqual([
+      { sessionID: "ses_selected", directory: cwd },
     ]);
   });
 
-  test("listPersistedAgents matches Windows cwd paths with forward slashes", async () => {
-    const runtime = new TestOpenCodeRuntime();
+  test("listImportableSessions matches Windows cwd paths with forward slashes", async () => {
+    const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     const requestedCwd = "C:/Users/Administrator/GhostFactory";
     const storedCwd = "C:\\Users\\Administrator\\GhostFactory";
@@ -1756,13 +2146,15 @@ describe("OpenCode persisted sessions", () => {
     };
     runtime.enqueueClient(openCodeClient);
 
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, { runtime });
-    const descriptors = await client.listPersistedAgents({ cwd: requestedCwd, limit: 1 });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const sessions = await client.listImportableSessions({ cwd: requestedCwd, limit: 1 });
 
-    expect(descriptors).toHaveLength(1);
-    expect(descriptors[0]).toMatchObject({
-      provider: "opencode",
-      sessionId: "ses_windows",
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      providerHandleId: "ses_windows",
       cwd: storedCwd,
       title: "Windows session",
     });

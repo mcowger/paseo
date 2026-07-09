@@ -14,6 +14,8 @@ export interface AgentHandle {
   page: Page;
   client: SeedDaemonClient;
   agentId: string;
+  projectId: string;
+  workspaceId: string;
   cwd: string;
   provider: RewindFlowProvider;
 }
@@ -61,14 +63,17 @@ function fullAccessConfig(provider: RewindFlowProvider): ProviderLaunchConfig {
   }
 }
 
-function agentRoute(cwd: string, agentId: string): string {
-  return `${buildHostWorkspaceRoute(getServerId(), cwd)}?open=${encodeURIComponent(
+function agentRoute(workspaceId: string, agentId: string): string {
+  return `${buildHostWorkspaceRoute(getServerId(), workspaceId)}?open=${encodeURIComponent(
     `agent:${agentId}`,
   )}`;
 }
 
-async function openAgent(page: Page, input: { cwd: string; agentId: string }): Promise<void> {
-  await page.goto(agentRoute(input.cwd, input.agentId));
+async function openAgent(
+  page: Page,
+  input: { workspaceId: string; agentId: string },
+): Promise<void> {
+  await page.goto(agentRoute(input.workspaceId, input.agentId));
   await page.waitForURL(
     (url) => url.pathname.includes("/workspace/") && !url.searchParams.has("open"),
     { timeout: 60_000 },
@@ -167,27 +172,33 @@ export async function launchAgent(input: {
   execFileSync("git", ["add", "README.md"], { cwd: input.cwd, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "Initial commit"], { cwd: input.cwd, stdio: "ignore" });
   const client = await connectSeedClient();
-  const opened = await client.openProject(input.cwd);
-  if (!opened.workspace) {
-    throw new Error(opened.error ?? `Failed to open project ${input.cwd}`);
+  const createdWorkspace = await client.createWorkspace({
+    source: { kind: "directory", path: input.cwd },
+  });
+  if (!createdWorkspace.workspace) {
+    throw new Error(createdWorkspace.error ?? `Failed to create workspace ${input.cwd}`);
   }
   const agent = await client.createAgent({
     ...fullAccessConfig(input.provider),
     cwd: input.cwd,
+    workspaceId: createdWorkspace.workspace.id,
     title: `rewind-flow-${input.provider}-${randomUUID()}`,
   });
   const handle = {
     page: input.page,
     client,
     agentId: agent.id,
+    projectId: createdWorkspace.workspace.projectId,
+    workspaceId: createdWorkspace.workspace.id,
     cwd: input.cwd,
     provider: input.provider,
   };
-  await openAgent(input.page, { cwd: input.cwd, agentId: agent.id });
+  await openAgent(input.page, { workspaceId: createdWorkspace.workspace.id, agentId: agent.id });
   return handle;
 }
 
 export async function closeAgent(handle: AgentHandle): Promise<void> {
+  await handle.client.removeProject(handle.projectId).catch(() => undefined);
   await handle.client.close().catch(() => undefined);
 }
 

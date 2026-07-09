@@ -6,6 +6,7 @@ import {
   createWorktree as createWorktreePrimitive,
   deriveWorktreeProjectHash,
   deletePaseoWorktree,
+  InvalidGitBranchNameError,
   getScriptConfigs,
   getWorktreeSetupCommands,
   getWorktreeTerminalSpecs,
@@ -32,8 +33,9 @@ import {
   realpathSync,
   writeFileSync,
   readFileSync,
+  chmodSync,
 } from "fs";
-import { dirname, join } from "path";
+import { delimiter, dirname, join } from "path";
 import { tmpdir } from "os";
 import net from "node:net";
 
@@ -270,6 +272,26 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       expect(metadata).toMatchObject({ version: 1, baseRefName: "dev" });
     });
 
+    it("checks out an existing local branch whose name contains uppercase letters and dots", async () => {
+      execFileSync("git", ["branch", "release/1.1.15"], { cwd: repoDir });
+
+      const result = await createLegacyWorktreeForTest({
+        cwd: repoDir,
+        worktreeSlug: "release-worktree",
+        source: { kind: "checkout-branch", branchName: "release/1.1.15" },
+        runSetup: true,
+        paseoHome,
+      });
+
+      expect(existsSync(result.worktreePath)).toBe(true);
+      const currentBranch = execFileSync("git", ["branch", "--show-current"], {
+        cwd: result.worktreePath,
+      })
+        .toString()
+        .trim();
+      expect(currentBranch).toBe("release/1.1.15");
+    });
+
     it("throws a typed error when checking out a branch already checked out in the main repo", async () => {
       let caughtError: unknown;
       try {
@@ -338,6 +360,51 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       const metadataPath = getPaseoWorktreeMetadataPath(result.worktreePath);
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
       expect(metadata).toMatchObject({ baseRefName: "main" });
+    });
+
+    it("fetches a GitHub PR branch when the head ref contains uppercase letters and dots", async () => {
+      const remoteDir = join(tempDir, "remote.git");
+      const remoteCloneDir = join(tempDir, "remote-clone");
+      execFileSync("git", ["clone", "--bare", repoDir, remoteDir]);
+      execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: repoDir });
+
+      execFileSync("git", ["clone", remoteDir, remoteCloneDir]);
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: remoteCloneDir });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: remoteCloneDir });
+      execFileSync("git", ["checkout", "-b", "Feature.X"], { cwd: remoteCloneDir });
+      writeFileSync(join(remoteCloneDir, "file.txt"), "from-uppercase-pr\n");
+      execFileSync("git", ["add", "file.txt"], { cwd: remoteCloneDir });
+      execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "uppercase pr branch"], {
+        cwd: remoteCloneDir,
+      });
+      const prHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: remoteCloneDir })
+        .toString()
+        .trim();
+      execFileSync("git", ["push", "origin", "Feature.X"], { cwd: remoteCloneDir });
+      execFileSync("git", [`--git-dir=${remoteDir}`, "update-ref", "refs/pull/43/head", prHead]);
+
+      const result = await createLegacyWorktreeForTest({
+        cwd: repoDir,
+        worktreeSlug: "pr-43",
+        source: {
+          kind: "checkout-github-pr",
+          githubPrNumber: 43,
+          headRef: "Feature.X",
+          baseRefName: "main",
+        },
+        runSetup: true,
+        paseoHome,
+      });
+
+      expect(readFileSync(join(result.worktreePath, "file.txt"), "utf8")).toBe(
+        "from-uppercase-pr\n",
+      );
+      const currentBranch = execFileSync("git", ["branch", "--show-current"], {
+        cwd: result.worktreePath,
+      })
+        .toString()
+        .trim();
+      expect(currentBranch).toBe("Feature.X");
     });
 
     it("prefers origin/{branch} over local {branch} when both exist", async () => {
@@ -423,6 +490,42 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
           worktreeSlug: "test",
         }),
       ).rejects.toThrow("Invalid branch name");
+    });
+
+    it("throws a typed error when checking out an invalid existing branch name", async () => {
+      let caughtError: unknown;
+      try {
+        await createLegacyWorktreeForTest({
+          cwd: repoDir,
+          worktreeSlug: "invalid-existing-branch",
+          source: { kind: "checkout-branch", branchName: "bad..name" },
+          runSetup: true,
+          paseoHome,
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(InvalidGitBranchNameError);
+      expect((caughtError as InvalidGitBranchNameError).branchName).toBe("bad..name");
+    });
+
+    it("throws a typed error when checking out a ref that is valid but not a branch name", async () => {
+      let caughtError: unknown;
+      try {
+        await createLegacyWorktreeForTest({
+          cwd: repoDir,
+          worktreeSlug: "invalid-option-like-branch",
+          source: { kind: "checkout-branch", branchName: "-bad" },
+          runSetup: true,
+          paseoHome,
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(InvalidGitBranchNameError);
+      expect((caughtError as InvalidGitBranchNameError).branchName).toBe("-bad");
     });
 
     it("handles branch name collision by adding suffix", async () => {
@@ -533,6 +636,68 @@ describe.skipIf(isPlatform("win32"))("worktree POSIX-only", () => {
       expect(readFileSync(join(result.worktreePath, "setup.log"), "utf8").trim()).toBe(
         "hello from string setup",
       );
+    });
+
+    it("runs setup commands with the daemon PATH instead of login profile PATH", async () => {
+      const home = join(tempDir, "host-home");
+      const binDir = join(tempDir, "daemon-bin");
+      mkdirSync(home);
+      mkdirSync(binDir);
+
+      const shimPath = join(binDir, "paseo-shim");
+      writeFileSync(shimPath, "#!/bin/sh\nprintf 'shim:%s\\n' \"$1\"\n");
+      chmodSync(shimPath, 0o755);
+      writeFileSync(join(home, ".bash_profile"), "export PATH=/usr/bin:/bin\n");
+      const bashEnvPath = join(home, "bash-env");
+      writeFileSync(bashEnvPath, "export PATH=/usr/bin:/bin\n");
+      writeFileSync(
+        join(repoDir, "paseo.json"),
+        JSON.stringify({
+          worktree: {
+            setup: "command -v paseo-shim >/dev/null && paseo-shim ok > setup-path.log",
+          },
+        }),
+      );
+
+      const originalHome = process.env.HOME;
+      const originalPath = process.env.PATH;
+      const originalBashEnv = process.env.BASH_ENV;
+      process.env.HOME = home;
+      process.env.PATH = `${binDir}${delimiter}${originalPath ?? "/usr/bin:/bin"}`;
+      process.env.BASH_ENV = bashEnvPath;
+
+      try {
+        await runWorktreeSetupCommands({
+          worktreePath: repoDir,
+          branchName: "main",
+          cleanupOnFailure: false,
+          runtimeEnv: {
+            PASEO_SOURCE_CHECKOUT_PATH: repoDir,
+            PASEO_ROOT_PATH: repoDir,
+            PASEO_WORKTREE_PATH: repoDir,
+            PASEO_BRANCH_NAME: "main",
+            PASEO_WORKTREE_PORT: "12345",
+          },
+        });
+      } finally {
+        if (originalHome === undefined) {
+          delete process.env.HOME;
+        } else {
+          process.env.HOME = originalHome;
+        }
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        if (originalBashEnv === undefined) {
+          delete process.env.BASH_ENV;
+        } else {
+          process.env.BASH_ENV = originalBashEnv;
+        }
+      }
+
+      expect(readFileSync(join(repoDir, "setup-path.log"), "utf8").trim()).toBe("shim:ok");
     });
 
     it("treats blank lifecycle strings as empty", () => {

@@ -1,7 +1,14 @@
 import { test, expect } from "./fixtures";
+import {
+  buildHostWorkspaceRoute,
+  buildOpenProjectRoute,
+  buildSettingsRoute,
+  buildSettingsSectionRoute,
+} from "@/utils/host-routes";
 import { gotoAppShell, openSettings } from "./helpers/app";
 import { getE2EDaemonPort } from "./helpers/daemon-port";
 import {
+  closeCompactSettings,
   openSettingsSection,
   expectSettingsHeader,
   openAddHostFlow,
@@ -31,8 +38,18 @@ import {
   selectSettingsHost,
   expectSettingsHostPickerLabel,
   openSettingsHostSection,
+  removeCurrentHostFromSettings,
 } from "./helpers/settings";
 import { getServerId } from "./helpers/server-id";
+import { expectAppRoute } from "./helpers/route-assertions";
+
+async function openWorkspace(
+  page: import("@playwright/test").Page,
+  workspace: { workspaceId: string },
+) {
+  await page.goto(buildHostWorkspaceRoute(getServerId(), workspace.workspaceId));
+  await expect(page.getByTestId("menu-button")).toBeVisible();
+}
 
 test.describe("Settings sidebar navigation", () => {
   test("clicking a sidebar section updates the URL and renders the section", async ({ page }) => {
@@ -110,7 +127,7 @@ test.describe("Settings — compact master-detail", () => {
 
   test("/settings renders only the sidebar list (no section content)", async ({ page }) => {
     await gotoAppShell(page);
-    await openCompactSettings(page);
+    await openCompactSettings(page, buildOpenProjectRoute());
 
     await expectSettingsSidebarSections(page, ["general", "diagnostics", "about"]);
     await expectCompactSettingsList(page);
@@ -122,10 +139,10 @@ test.describe("Settings — compact master-detail", () => {
 
   test("tapping a section pushes /settings/[section] and shows a back button", async ({ page }) => {
     await gotoAppShell(page);
-    await openCompactSettings(page);
+    await openCompactSettings(page, buildOpenProjectRoute());
 
     await openSettingsSection(page, "diagnostics");
-    await expect(page).toHaveURL(/\/settings\/diagnostics$/);
+    await expectAppRoute(page, buildSettingsSectionRoute("diagnostics"));
     await expectDiagnosticsContent(page);
     await expectSettingsSidebarHidden(page);
     await expectSettingsBackButton(page);
@@ -133,10 +150,10 @@ test.describe("Settings — compact master-detail", () => {
 
   test("back from a section detail returns to the /settings list", async ({ page }) => {
     await gotoAppShell(page);
-    await openCompactSettings(page);
+    await openCompactSettings(page, buildOpenProjectRoute());
 
     await openSettingsSection(page, "about");
-    await expect(page).toHaveURL(/\/settings\/about$/);
+    await expectAppRoute(page, buildSettingsSectionRoute("about"));
 
     await goBackInSettings(page);
     await expectCompactSettingsList(page);
@@ -147,7 +164,7 @@ test.describe("Settings — compact master-detail", () => {
     page,
   }) => {
     await gotoAppShell(page);
-    await openCompactSettings(page);
+    await openCompactSettings(page, buildOpenProjectRoute());
 
     await openCompactSettingsHost(page);
     await expectSettingsBackButton(page);
@@ -156,11 +173,11 @@ test.describe("Settings — compact master-detail", () => {
 
   test("back from a host detail returns to the /settings list", async ({ page }) => {
     await gotoAppShell(page);
-    await openCompactSettings(page);
+    await openCompactSettings(page, buildOpenProjectRoute());
 
     await openCompactSettingsHost(page);
     await goBackInSettings(page);
-    await expect(page).toHaveURL(/\/settings$/);
+    await expectAppRoute(page, buildSettingsRoute());
     await expectSettingsSidebarVisible(page);
   });
 
@@ -177,14 +194,30 @@ test.describe("Settings — compact master-detail", () => {
       { serverId: secondaryServerId, label: secondaryHostLabel, endpoint },
     ]);
     await gotoAppShell(page);
-    await openCompactSettings(page);
+    await openCompactSettings(page, buildOpenProjectRoute());
 
     await selectSettingsHost(page, secondaryServerId);
 
-    await expect(page).toHaveURL(/\/settings$/);
+    await expectAppRoute(page, buildSettingsRoute());
     await expectSettingsSidebarVisible(page);
     await expectSettingsHostPickerLabel(page, secondaryHostLabel);
 
     await openSettingsHostSection(page, secondaryServerId, "connections");
+  });
+
+  test("removing the last active host returns to welcome after settings closes", async ({
+    page,
+    withWorkspace,
+  }) => {
+    const workspace = await withWorkspace({ prefix: "remove-host-compact-" });
+
+    await openWorkspace(page, workspace);
+    await openCompactSettings(page, buildHostWorkspaceRoute(getServerId(), workspace.workspaceId));
+    await openSettingsHostSection(page, getServerId(), "host");
+    await removeCurrentHostFromSettings(page);
+    await closeCompactSettings(page);
+
+    await expect(page).toHaveURL(/\/welcome$/);
+    await expect(page.getByTestId("welcome-direct-connection")).toBeVisible();
   });
 });

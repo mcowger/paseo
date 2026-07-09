@@ -11,6 +11,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ActivityIndicator,
   Modal,
@@ -302,7 +303,7 @@ interface TriggerState {
 }
 type TriggerStyleProp = StyleProp<ViewStyle> | ((state: TriggerState) => StyleProp<ViewStyle>);
 
-interface DropdownMenuTriggerProps extends Omit<PressableProps, "style" | "children"> {
+export interface DropdownMenuTriggerProps extends Omit<PressableProps, "style" | "children"> {
   style?: TriggerStyleProp;
   children: ReactNode | ((state: TriggerState) => ReactNode);
 }
@@ -442,6 +443,7 @@ export function DropdownMenuContent({
   scrollable?: boolean;
   testID?: string;
 }>): ReactElement | null {
+  const { t } = useTranslation();
   const { open, setOpen, triggerRef, flushPendingSelect } =
     useDropdownMenuContext("DropdownMenuContent");
   const [modalVisible, setModalVisible] = useState(false);
@@ -625,7 +627,7 @@ export function DropdownMenuContent({
       <View style={styles.overlay}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Menu backdrop"
+          accessibilityLabel={t("menu.backdrop")}
           style={styles.backdrop}
           onPress={handleClose}
           testID={testID ? `${testID}-backdrop` : undefined}
@@ -899,8 +901,6 @@ const styles = StyleSheet.create((theme) => ({
   labelText: {
     fontSize: theme.fontSize.xs,
     color: theme.colors.foregroundMuted,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
   },
   separator: {
     height: 1,
@@ -992,5 +992,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   itemContent: {
     flexShrink: 1,
+    minWidth: 0,
   },
 }));

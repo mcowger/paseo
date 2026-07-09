@@ -5,6 +5,12 @@
 <h1 align="center">Paseo</h1>
 
 <p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="README.ja.md">日本語</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/getpaseo/paseo/stargazers">
     <img src="https://img.shields.io/github/stars/getpaseo/paseo?style=flat&logo=github" alt="GitHub stars">
   </a>
@@ -31,6 +37,10 @@
 <p align="center">
   <img src="https://paseo.sh/mobile-mockup.png" alt="Paseo mobile app" width="100%">
 </p>
+
+> [!NOTE]
+> I'm a solo maintainer and don't always keep up with GitHub Issues daily.
+> If something is urgent or blocking you, [Discord](https://discord.gg/jz8T2uahpH) is the fastest place to reach me.
 
 ---
 
@@ -77,6 +87,21 @@ For full setup and configuration, see:
 
 - [Docs](https://paseo.sh/docs)
 - [Configuration reference](https://paseo.sh/docs/configuration)
+
+### Docker
+
+Run the Paseo daemon and self-hosted web UI in Docker:
+
+```bash
+docker run -d --name paseo \
+  -p 6767:6767 \
+  -e PASEO_PASSWORD=change-me \
+  -v "$PWD/paseo-home:/home/paseo" \
+  -v "$PWD:/workspace" \
+  ghcr.io/getpaseo/paseo:latest
+```
+
+Open `http://localhost:6767` after it starts. Extend the base image with the agent CLIs you use, then provide credentials through environment variables or the persistent `/home/paseo` volume. See the [Docker documentation](docs/docker.md) for full setup details.
 
 ## CLI
 
@@ -144,52 +169,7 @@ npm run typecheck
 ## Community
 
 - [paseo-relay](https://github.com/zenghongtu/paseo-relay) — self-hosted relay in Go
-
-### Self-hosted relay TLS
-
-Self-hosted relays use `ws://` unless TLS is opted in. For a relay behind nginx on 443, start the daemon with:
-
-```bash
-PASEO_RELAY_ENDPOINT=127.0.0.1:8080 \
-PASEO_RELAY_PUBLIC_ENDPOINT=relay.example.com:443 \
-PASEO_RELAY_USE_TLS=true \
-paseo daemon start
-```
-
-Equivalent config:
-
-```json
-{
-  "daemon": {
-    "relay": {
-      "enabled": true,
-      "endpoint": "127.0.0.1:8080",
-      "publicEndpoint": "relay.example.com:443",
-      "useTls": true
-    }
-  }
-}
-```
-
-Minimal nginx WebSocket proxy:
-
-```nginx
-server {
-  listen 443 ssl;
-  server_name relay.example.com;
-
-  ssl_certificate /etc/letsencrypt/live/relay.example.com/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/relay.example.com/privkey.pem;
-
-  location /ws {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-  }
-}
-```
+- [paseo-vscode](https://marketplace.visualstudio.com/items?itemName=hinnes.paseo-vscode) — VS Code extension
 
 ---
 

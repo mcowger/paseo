@@ -8,18 +8,28 @@
 ## Running the dev server
 
 ```bash
-npm run dev
+npm run dev:server
+npm run dev:app
+npm run dev:desktop
 ```
 
-`scripts/dev.sh` runs the daemon and Expo together via `concurrently`, fronted by [`portless`](https://www.npmjs.com/package/portless) so each service is reachable at a stable name like `https://daemon.localhost` / `https://app.localhost` instead of a fixed port. The underlying TCP ports are ephemeral — never hardcode them. (Windows uses `scripts/dev.ps1`, which still binds the daemon to `localhost:6767` directly.)
+Root checkout dev is intentionally split across terminals:
+
+- `npm run dev:server` runs the daemon on `127.0.0.1:6768`.
+- `npm run dev:app` runs Expo on `http://localhost:8081` and connects to the dev daemon.
+- `npm run dev:desktop` runs its own Electron-flavored Expo server on the first free port from `8082` through `8089`. It never claims port `8081`.
+
+`npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
 
 ### PASEO_HOME
 
-`PASEO_HOME` is the directory that holds runtime state (agents, sockets, daemon log). Resolution rules:
+`PASEO_HOME` is the directory that holds runtime state (agents, worktrees, workspace config, sockets, daemon log). Resolution rules:
 
 - The **server itself** (e.g. when launched by the desktop app or `npm run start`) defaults to `~/.paseo` (see `packages/server/src/server/paseo-home.ts`).
-- **`npm run dev` from a git worktree** derives a stable home like `~/.paseo-<worktree-name>` and, on first run, seeds it from `~/.paseo` by copying agent/project JSON metadata and `config.json`. Checkout/worktree directories are not copied.
-- **`npm run dev` from the main checkout** (not a worktree) uses a fresh `mktemp` directory under `$TMPDIR` and removes it on exit. Set `PASEO_HOME` explicitly to keep state across runs.
+- **Repo dev scripts** default to `$ROOT/.dev/paseo-home`, where `$ROOT` is the current checkout or worktree root. This keeps all dev state scoped to the checkout instead of the packaged desktop app.
+- **`npm run cli -- ...`** runs through the same dev-home wrapper as the dev scripts, so the in-repo CLI automatically targets the current checkout's `.dev/paseo-home` and configured dev daemon endpoint.
+- **Paseo-created worktrees** seed `$PASEO_WORKTREE_PATH/.dev/paseo-home` from `$PASEO_SOURCE_CHECKOUT_PATH/.dev/paseo-home` by copying durable JSON metadata. Runtime files like pid files, sockets, and logs are not copied.
+- **This repo's worktree setup** also best-effort seeds `packages/app/ios` and the newest `.dev/ios-build` entry from the source checkout so iOS simulator services can reuse native project and Xcode cache state when it is safe enough to do so.
 
 Override knobs:
 
@@ -32,16 +42,39 @@ PASEO_DEV_RESET_HOME=1 npm run dev            # clear and reseed the derived wor
 ### Daemon endpoints
 
 - Stable daemon launched by the desktop app: `localhost:6767`.
-- `npm run dev` (macOS/Linux): portless URLs only — read them from the `dev.sh` banner or `portless get daemon` / `portless get app`.
+- Root checkout dev daemon: `localhost:6768`.
+- Root checkout Expo: `http://localhost:8081`.
+- Root checkout desktop dev Expo: first free port from `8082` through `8089`.
 - `npm run dev` (Windows): `localhost:6767` for the daemon.
 
-In any worktree-style or portless setup, never assume default ports.
+In Paseo-managed worktree services, use the injected service environment rather than hardcoded root checkout ports.
+
+### Expo Router
+
+Route ownership, startup restore, and native blank-screen gotchas live in
+[expo-router.md](expo-router.md). Read it before changing `packages/app/src/app`,
+startup routing, remembered workspace restore, or active workspace selection.
+
+### iOS simulator preview service
+
+Paseo worktrees expose the native iOS dev app through the `ios-simulator` service in `paseo.json`. The service URL serves the simulator preview at `/.sim`, so the preview link is `${PASEO_URL}/.sim`.
+
+The service is designed for concurrent worktrees: it derives a deterministic simulator identity from the worktree path, uses the worktree's assigned `PASEO_PORT`, pins `serve-sim` to that simulator UDID, and only tears down that worktree's helper/simulator state. It must not rely on the globally booted simulator or any fixed Metro port.
+
+Worktree setup best-effort seeds the generated iOS project and newest native build cache from the source checkout before the service runs. The service still validates the native project by running Expo prebuild and Xcode; the seed only avoids paying all setup/build cost from a cold worktree every time.
+
+Starting the service must not create, focus, reveal, or leave behind macOS Simulator.app windows. The browser preview is the user-visible simulator surface.
 
 ### Desktop renderer profiling
 
 `npm run dev:desktop` starts Electron with Chromium remote debugging enabled on
 `http://127.0.0.1:9223` so renderer CPU profiles can be captured through CDP.
-Override the port with `PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` when `9223` is busy.
+It launches its own Electron-flavored Expo server and passes that URL to Electron.
+Override the CDP port with `PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` when `9223` is busy.
+
+When running a dedicated Electron QA instance against a non-default Expo port, set
+`EXPO_DEV_URL` explicitly. Desktop main defaults to `http://localhost:8081`, so
+`PASEO_PORT=57928` alone starts Metro on 57928 but Electron still loads 8081.
 
 ### React render profiling
 
@@ -140,10 +173,32 @@ The supervisor rotates `daemon.log`. Persisted `log.file.rotate` settings in
 `PASEO_LOG_ROTATE_SIZE` and `PASEO_LOG_ROTATE_COUNT` env vars override the
 defaults. The default rotation is `10m` x `3` files everywhere.
 
+### Agent Tool Catalog Measurement
+
+Measure the MCP `tools/list` payload that Paseo injects into agents with:
+
+```bash
+npm run measure:agent-tools --workspace=@getpaseo/server
+```
+
+The command reports compact JSON bytes, estimated tokens, field totals, largest
+tools, and the browser-tools delta. It defaults to the agent-scoped catalog; use
+`-- --scope=top-level` for the unaffiliated `/mcp/agents` shape and `-- --json`
+for machine-readable output.
+
 ## paseo.json service scripts
 
 `worktree.setup` and `worktree.teardown` accept either a multiline shell script or an array
 of commands. Both run sequentially.
+
+Lifecycle commands run in the worktree through a stable script shell: `bash`
+resolved from `PATH` on macOS/Linux, and PowerShell with `-NoProfile` on
+Windows. They inherit the daemon environment plus Paseo's lifecycle variables;
+login and interactive shell startup files are not loaded, and Bash's `BASH_ENV`
+hook is unset. Daemon-run loop verify checks and ACP single-string terminal
+commands use the same non-login Bash behavior on macOS/Linux, but preserve their
+existing `cmd.exe /c` string semantics on Windows. Service scripts are separate:
+they launch in a terminal and receive the service environment described below.
 
 ```json
 {
@@ -181,11 +236,61 @@ Service proxy hostnames use the double-dash shape: `web--feature-auth--project.l
 }
 ```
 
+## Bundled daemon web UI
+
+> The user-facing guide for this feature (enabling it, reverse proxy, TLS, tunnels, security) lives at [public-docs/web-ui.md](../public-docs/web-ui.md). This section is the contributor/build reference: how the artifact is produced, bundled, and excluded from desktop packaging.
+
+The daemon can optionally serve the browser web client from the same HTTP server. This is disabled by default.
+
+Enable it for a running daemon with:
+
+```bash
+paseo daemon start --web-ui
+```
+
+Or set the environment variable:
+
+```bash
+PASEO_WEB_UI_ENABLED=true paseo daemon start
+```
+
+Or persist it in `config.json`:
+
+```json
+{
+  "features": {
+    "webUi": {
+      "enabled": true
+    }
+  }
+}
+```
+
+When enabled, opening the daemon HTTP origin (for example `http://localhost:6767/`) serves the web app. The same HTTP server continues to serve `/api/*`, `/mcp/*`, `/public/*`, the WebSocket upgrade, and service-proxy routes. Static files load without daemon bearer auth; API and WebSocket calls still enforce auth.
+
+The served app auto-bootstraps a connection to the same origin, so opening `http://localhost:6767/` directly usually skips the Add Host step.
+
+Build the artifact for packaging or measurement with:
+
+```bash
+npm run build:daemon-web-ui
+```
+
+This exports the normal browser web app (not the Electron-flavored desktop renderer) and copies it into `packages/server/dist/server/web-ui`, precompressing `.html`, `.js`, `.css`, and JSON assets as `.br` and `.gz`.
+
+Measured bundle size for a standard Expo web export:
+
+- raw: 10.77 MiB
+- gzip: 2.55 MiB
+- brotli: 1.93 MiB
+
+The desktop-managed daemon disables the bundled web UI by default (`PASEO_WEB_UI_ENABLED=false`) because the desktop app already ships the renderer as `app-dist`. Shipping the same assets again inside `@getpaseo/server` would duplicate the ~10.8 MiB install. Desktop packaging also excludes `node_modules/@getpaseo/server/dist/server/web-ui/**` from the packaged app.
+
 ## Built workspace packages
 
 Package imports resolve through package exports to compiled `dist/` output, not sibling `src/` files. This is true in local dev and in published packages: the app, daemon, CLI, and SDK consumers should all exercise the same runtime paths.
 
-`npm run dev`, `npm run dev:server`, and `npm run dev:app` build the workspace packages they need once, then keep `@getpaseo/protocol` and `@getpaseo/client` fresh with TypeScript watch builds while the daemon or Expo runs. If you change protocol schemas or client code outside those watch workflows, rebuild the producer before trusting runtime behavior.
+`npm run dev:server` builds the server-side workspace packages once, then keeps `@getpaseo/protocol` and `@getpaseo/client` fresh with TypeScript watch builds while the daemon runs. If you change protocol schemas or client code outside that watch workflow, rebuild the producer before trusting runtime behavior.
 
 Use the named root build targets instead of remembering workspace dependency chains:
 
@@ -197,6 +302,8 @@ npm run build:app-deps     # highlight -> protocol -> client -> expo-two-way-aud
 ```
 
 Use `npm run build:server` whenever you have changed any daemon/server-facing package and need clean cross-package types or runtime behavior.
+
+The app Metro config disables Watchman and uses Metro's node crawler for exports. Keep that invariant unless you have verified production app exports on machines with and without Watchman installed; distro Watchman builds can differ in capabilities and change Metro's crawl behavior.
 
 For tighter loops, you can rebuild a single workspace:
 
@@ -223,7 +330,7 @@ install.
 
 ## CLI reference
 
-Use `npm run cli` to run the in-repo CLI from source (`npx tsx packages/cli/src/index.ts`). The globally installed `paseo` binary on macOS is a symlink into the installed Paseo desktop app, not this checkout — use it to drive the desktop's built-in daemon, but use `npm run cli` when you want to talk to the CLI you are editing.
+Use `npm run cli` to run the in-repo CLI from source (`npx tsx packages/cli/src/index.ts`). The script wraps the CLI with `scripts/dev-home.sh`, so it automatically uses this checkout's `.dev/paseo-home` and dev daemon endpoint unless you pass an explicit override. The globally installed `paseo` binary on macOS is a symlink into the installed Paseo desktop app, not this checkout — use it to drive the desktop's built-in daemon, but use `npm run cli` when you want to talk to the CLI you are editing.
 
 ```bash
 npm run cli -- ls -a -g              # List all agents globally
@@ -277,7 +384,7 @@ Get the session ID from the agent JSON (`persistence.sessionId`), then:
 
 ## Testing with Playwright MCP
 
-Point Playwright MCP at the running Expo web target. Under `npm run dev` (macOS/Linux) that is the portless URL printed in the dev banner — typically `https://app.localhost`. If you start Expo directly with `expo start --web` (no portless), Metro defaults to `http://localhost:8081`.
+Point Playwright MCP at the running Expo web target. For root checkout dev, `npm run dev:app` reserves `http://localhost:8081`. For Paseo-managed worktree app services, use the service URL or port shown by Paseo for that worktree.
 
 Do NOT use browser history (back/forward). Always navigate by clicking UI elements or using `browser_navigate` with the full URL — the app uses client-side routing and browser history breaks state.
 

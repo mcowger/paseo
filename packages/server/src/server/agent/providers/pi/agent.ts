@@ -3,10 +3,12 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "pino";
+import { z } from "zod";
 
 import {
   type AgentCapabilityFlags,
   type AgentClient,
+  type AgentFeature,
   type AgentLaunchContext,
   type AgentMetadata,
   type AgentMode,
@@ -22,13 +24,17 @@ import {
   type AgentSession,
   type AgentSessionConfig,
   type AgentSlashCommand,
+  type AgentSlashCommandKind,
   type AgentStreamEvent,
   type AgentUsage,
-  type ListPersistedAgentsOptions,
-  type ListModesOptions,
-  type ListModelsOptions,
-  type PersistedAgentDescriptor,
+  type FetchCatalogOptions,
+  type ImportableProviderSession,
+  type ImportProviderSessionContext,
+  type ImportProviderSessionInput,
+  type ListImportableSessionsOptions,
+  type ProviderCatalog,
 } from "../../agent-sdk-types.js";
+import { importSessionFromPersistence } from "../../provider-session-import.js";
 import { runProviderTurn } from "../provider-runner.js";
 import {
   checkProviderLaunchAvailable,
@@ -40,7 +46,7 @@ import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { composeSystemPromptParts } from "../../system-prompt.js";
 import {
   buildBinaryDiagnosticRows,
-  formatDiagnosticStatus,
+  buildCommandResolutionDiagnosticRows,
   formatProviderDiagnostic,
   formatProviderDiagnosticError,
   toDiagnosticErrorMessage,
@@ -52,10 +58,12 @@ import {
 } from "./history-mapper.js";
 import { PiCliRuntime } from "./cli-runtime.js";
 import { revertPiConversation } from "./rewind.js";
+import { listPiImportableSessions, readPiImportSessionConfig } from "./session-descriptor.js";
 import type { PiRuntime, PiRuntimeSession } from "./runtime.js";
 import type {
   PiAgentSessionEvent,
   PiAgentMessage,
+  PiCommandsRpcType,
   PiImageContent,
   PiModel,
   PiRpcSlashCommand,
@@ -76,19 +84,52 @@ import {
 const PI_PROVIDER = "pi";
 const DEFAULT_PI_THINKING_LEVEL: PiThinkingLevel = "medium";
 const PI_BINARY_COMMAND = process.env.PI_COMMAND ?? process.env.PI_ACP_PI_COMMAND ?? "pi";
+const PI_CATALOG_REQUEST_TIMEOUT_MS = 120_000;
 const PASEO_PI_TREE_EXTENSION_COMMAND = "paseo_tree";
 const PASEO_PI_CAPTURE_EXTENSION_COMMAND = "paseo_capture_entries";
 const PASEO_PI_ENTRY_CAPTURE_MARKER = "PASEO_ENTRY_CAPTURE";
 const PASEO_PI_COMMAND_RESULT_MARKER = "PASEO_COMMAND_RESULT";
-const PASEO_PI_EXTENSION_RESULT_TIMEOUT_MS = 10_000;
+const DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS = 30_000;
 const QUESTION_RESPONSE_HEADER = "Response";
 const QUESTION_COMMENT_HEADER = "Comment";
 const PI_ASK_USER_FREEFORM_SENTINEL = "✏️ Type custom response...";
 const COMBINED_ASK_USER_METADATA = "ask_user_select_optional_comment";
 
+export const PiProviderParamsSchema = z
+  .object({
+    sessionDir: z.string().min(1).optional(),
+    extensionTimeoutMs: z.number().int().positive().default(DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS),
+  })
+  .strict();
+
+type PiProviderParams = z.infer<typeof PiProviderParamsSchema>;
+
+const PI_HANDLED_BUILTIN_SLASH_COMMANDS: AgentSlashCommand[] = [
+  {
+    name: "compact",
+    description: "Manually compact the session context",
+    argumentHint: "[instructions]",
+    kind: "command",
+  },
+  {
+    name: "autocompact",
+    description: "Toggle automatic context compaction",
+    argumentHint: "[on|off|toggle]",
+    kind: "command",
+  },
+];
+
+function mapPiCommandKind(source: PiRpcSlashCommand["source"]): AgentSlashCommandKind {
+  if (source === "skill") {
+    return "skill";
+  }
+  return "command";
+}
+
 const PI_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
+  supportsSessionListing: true,
   supportsDynamicModes: true,
   supportsMcpServers: false,
   supportsReasoningStream: true,
@@ -115,6 +156,8 @@ const PI_THINKING_OPTIONS: ReadonlyArray<{
 interface PiRpcAgentClientOptions {
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
+  providerParams?: unknown;
+  commandsRpcType?: PiCommandsRpcType;
   runtime?: PiRuntime;
 }
 
@@ -145,6 +188,7 @@ interface PiRpcAgentSessionOptions {
   initialState: PiSessionState;
   capabilities: AgentCapabilityFlags;
   cleanup?: () => void;
+  extensionTimeoutMs?: number;
 }
 
 interface PiResumeConfig {
@@ -205,8 +249,21 @@ interface ExtensionUiMappingOptions {
   allowFreeform?: boolean;
 }
 
+interface PiSlashCommandInvocation {
+  commandName: string;
+  args?: string;
+}
+
+type AutoCompactMode = boolean | "toggle" | "unknown";
+
 function normalizePiModelLabel(label: string): string {
-  return label.trim().replace(/[_\s]+/g, " ");
+  const normalizedLabel = label.trim().replace(/[_\s]+/g, " ");
+  const vendorSeparatorIndex = normalizedLabel.indexOf(": ");
+  if (vendorSeparatorIndex === -1) {
+    return normalizedLabel;
+  }
+
+  return normalizedLabel.slice(vendorSeparatorIndex + 2).trim();
 }
 
 export function transformPiModels(models: AgentModelDefinition[]): AgentModelDefinition[] {
@@ -245,6 +302,20 @@ function normalizePiThinkingOption(value: string | null | undefined): PiThinking
     return null;
   }
   return isPiThinkingLevel(value) ? value : null;
+}
+
+function parseAutoCompactMode(value: string | undefined): AutoCompactMode {
+  const mode = (value ?? "toggle").trim().toLowerCase();
+  if (mode === "on" || mode === "true" || mode === "enable" || mode === "enabled") {
+    return true;
+  }
+  if (mode === "off" || mode === "false" || mode === "disable" || mode === "disabled") {
+    return false;
+  }
+  if (mode === "toggle") {
+    return "toggle";
+  }
+  return "unknown";
 }
 
 function mapThinkingOption(option: (typeof PI_THINKING_OPTIONS)[number]) {
@@ -901,8 +972,12 @@ function mapPiModel(model: PiModel): AgentModelDefinition {
   };
 }
 
-function createRuntime(logger: Logger, runtimeSettings?: ProviderRuntimeSettings): PiRuntime {
-  return new PiCliRuntime({ logger, runtimeSettings });
+function createRuntime(
+  logger: Logger,
+  runtimeSettings?: ProviderRuntimeSettings,
+  commandsRpcType?: PiCommandsRpcType,
+): PiRuntime {
+  return new PiCliRuntime({ logger, runtimeSettings, commandsRpcType });
 }
 
 export class PiRpcAgentSession implements AgentSession {
@@ -922,6 +997,9 @@ export class PiRpcAgentSession implements AgentSession {
   private readonly seenUserEntryIds = new Set<string>();
   private readonly pendingUserMessages: PendingPiUserMessage[] = [];
   private readonly pendingExtensionResults = new Map<string, PendingExtensionResult>();
+  private outOfBandCompactionEmit: ((event: AgentStreamEvent) => void) | null = null;
+  private outOfBandCompactionStarted = false;
+  private outOfBandCompactionCompleted = false;
   private state: PiSessionState;
   private closed = false;
 
@@ -935,6 +1013,7 @@ export class PiRpcAgentSession implements AgentSession {
       normalizePiThinkingOption(options.config.thinkingOptionId) ??
       this.state.thinkingLevel ??
       null;
+    this.extensionTimeoutMs = options.extensionTimeoutMs ?? DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS;
 
     this.runtimeSession.onEvent((event) => {
       this.handleRuntimeEvent(event);
@@ -944,6 +1023,7 @@ export class PiRpcAgentSession implements AgentSession {
   private readonly runtimeSession: PiRuntimeSession;
   private readonly config: AgentSessionConfig;
   private readonly cleanup?: () => void;
+  private readonly extensionTimeoutMs: number;
 
   get id(): string | null {
     return this.state.sessionId;
@@ -1127,11 +1207,47 @@ export class PiRpcAgentSession implements AgentSession {
 
   async listCommands(): Promise<AgentSlashCommand[]> {
     const commands = await this.runtimeSession.getCommands();
-    return commands.map((command) => ({
-      name: command.name,
-      description: command.description ?? command.source,
-      argumentHint: "",
-    }));
+    const mappedCommands = new Map<string, AgentSlashCommand>(
+      PI_HANDLED_BUILTIN_SLASH_COMMANDS.map((command) => [command.name, { ...command }]),
+    );
+    for (const command of commands) {
+      const knownCommand = mappedCommands.get(command.name);
+      mappedCommands.set(command.name, {
+        name: command.name,
+        description: command.description ?? command.source,
+        argumentHint: knownCommand?.argumentHint ?? "",
+        kind: mapPiCommandKind(command.source),
+      });
+    }
+    return [...mappedCommands.values()];
+  }
+
+  tryHandleOutOfBand(
+    prompt: AgentPromptInput,
+  ): { run(ctx: { emit: (event: AgentStreamEvent) => void }): Promise<void> } | null {
+    if (typeof prompt !== "string") {
+      return null;
+    }
+    const parsed = this.parseSlashCommandInput(prompt);
+    if (!parsed) {
+      return null;
+    }
+    const commandName = parsed.commandName.toLowerCase();
+    if (commandName === "compact") {
+      return {
+        run: async ({ emit }) => {
+          await this.executeCompactCommand(parsed.args, emit);
+        },
+      };
+    }
+    if (commandName === "autocompact") {
+      return {
+        run: async ({ emit }) => {
+          await this.executeAutoCompactCommand(parsed.args, emit);
+        },
+      };
+    }
+    return null;
   }
 
   async setModel(modelId: string | null): Promise<void> {
@@ -1172,6 +1288,128 @@ export class PiRpcAgentSession implements AgentSession {
     return this.activeTurnId ?? undefined;
   }
 
+  private parseSlashCommandInput(text: string): PiSlashCommandInvocation | null {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("/") || trimmed.length <= 1) {
+      return null;
+    }
+    const withoutPrefix = trimmed.slice(1);
+    const firstWhitespaceIdx = withoutPrefix.search(/\s/);
+    const commandName =
+      firstWhitespaceIdx === -1 ? withoutPrefix : withoutPrefix.slice(0, firstWhitespaceIdx);
+    if (!commandName || commandName.includes("/")) {
+      return null;
+    }
+    const rawArgs =
+      firstWhitespaceIdx === -1 ? "" : withoutPrefix.slice(firstWhitespaceIdx + 1).trim();
+    return rawArgs.length > 0 ? { commandName, args: rawArgs } : { commandName };
+  }
+
+  private async executeCompactCommand(
+    customInstructions: string | undefined,
+    emit: (event: AgentStreamEvent) => void,
+  ): Promise<void> {
+    if (this.outOfBandCompactionEmit) {
+      throw new Error("A Pi compact command is already running");
+    }
+    this.outOfBandCompactionEmit = emit;
+    this.outOfBandCompactionStarted = false;
+    this.outOfBandCompactionCompleted = false;
+    try {
+      await this.runtimeSession.compact(customInstructions);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        this.outOfBandCompactionEmit === emit &&
+        this.outOfBandCompactionStarted &&
+        !this.outOfBandCompactionCompleted
+      ) {
+        this.emitCompactionTimeline({
+          turnId: undefined,
+          item: {
+            type: "compaction",
+            status: "completed",
+            trigger: "manual",
+          },
+        });
+      }
+      emit({
+        type: "timeline",
+        provider: PI_PROVIDER,
+        item: {
+          type: "assistant_message",
+          text: `[Error] Failed to compact context: ${message}`,
+        },
+      });
+    } finally {
+      if (this.outOfBandCompactionEmit === emit && !this.outOfBandCompactionStarted) {
+        this.outOfBandCompactionEmit = null;
+        this.outOfBandCompactionStarted = false;
+        this.outOfBandCompactionCompleted = false;
+      }
+    }
+  }
+
+  private async executeAutoCompactCommand(
+    mode: string | undefined,
+    emit: (event: AgentStreamEvent) => void,
+  ): Promise<void> {
+    let enabled = parseAutoCompactMode(mode);
+    if (enabled === "unknown") {
+      emit({
+        type: "timeline",
+        provider: PI_PROVIDER,
+        item: {
+          type: "assistant_message",
+          text: "[Error] Usage: /autocompact [on|off|toggle]",
+        },
+      });
+      return;
+    }
+    if (enabled === "toggle") {
+      const state = await this.runtimeSession.getState();
+      if (typeof state.autoCompactionEnabled !== "boolean") {
+        emit({
+          type: "timeline",
+          provider: PI_PROVIDER,
+          item: {
+            type: "assistant_message",
+            text: "[Error] Auto-compaction state is unavailable. Use /autocompact on or /autocompact off.",
+          },
+        });
+        return;
+      }
+      enabled = !state.autoCompactionEnabled;
+    }
+
+    try {
+      await this.runtimeSession.setAutoCompaction(enabled);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      emit({
+        type: "timeline",
+        provider: PI_PROVIDER,
+        item: {
+          type: "assistant_message",
+          text: `[Error] Failed to set auto-compaction: ${message}`,
+        },
+      });
+      return;
+    }
+    this.state = {
+      ...this.state,
+      autoCompactionEnabled: enabled,
+    };
+    emit({
+      type: "timeline",
+      provider: PI_PROVIDER,
+      item: {
+        type: "assistant_message",
+        text: `Auto-compaction ${enabled ? "enabled" : "disabled"}.`,
+      },
+    });
+  }
+
   private async requestEntryCapture(reason: string): Promise<void> {
     const requestId = randomUUID();
     const resultPromise = this.waitForExtensionResult(requestId);
@@ -1185,7 +1423,7 @@ export class PiRpcAgentSession implements AgentSession {
       const timer = setTimeout(() => {
         this.pendingExtensionResults.delete(requestId);
         reject(new Error(`Pi extension result timed out for request ${requestId}`));
-      }, PASEO_PI_EXTENSION_RESULT_TIMEOUT_MS);
+      }, this.extensionTimeoutMs);
       this.pendingExtensionResults.set(requestId, { resolve, reject, timer });
     });
   }
@@ -1433,9 +1671,7 @@ export class PiRpcAgentSession implements AgentSession {
         return;
       }
       case "compaction_start":
-        this.emit({
-          type: "timeline",
-          provider: PI_PROVIDER,
+        this.emitCompactionTimeline({
           turnId,
           item: {
             type: "compaction",
@@ -1445,13 +1681,12 @@ export class PiRpcAgentSession implements AgentSession {
         });
         return;
       case "compaction_end":
-        this.emit({
-          type: "timeline",
-          provider: PI_PROVIDER,
+        this.emitCompactionTimeline({
           turnId,
           item: {
             type: "compaction",
             status: "completed",
+            trigger: event.reason === "manual" ? "manual" : "auto",
           },
         });
         return;
@@ -1461,6 +1696,37 @@ export class PiRpcAgentSession implements AgentSession {
       default:
         return;
     }
+  }
+
+  private emitCompactionTimeline(input: {
+    turnId: string | undefined;
+    item: Extract<AgentStreamEvent, { type: "timeline" }>["item"];
+  }): void {
+    const emitOutOfBand = this.outOfBandCompactionEmit;
+    if (emitOutOfBand && input.item.type === "compaction") {
+      if (input.item.status === "loading") {
+        this.outOfBandCompactionStarted = true;
+      }
+      if (input.item.status === "completed") {
+        this.outOfBandCompactionCompleted = true;
+      }
+    }
+    const event: AgentStreamEvent = {
+      type: "timeline",
+      provider: PI_PROVIDER,
+      ...(emitOutOfBand ? {} : { turnId: input.turnId }),
+      item: input.item,
+    };
+    if (emitOutOfBand) {
+      emitOutOfBand(event);
+      if (input.item.type === "compaction" && input.item.status === "completed") {
+        this.outOfBandCompactionEmit = null;
+        this.outOfBandCompactionStarted = false;
+        this.outOfBandCompactionCompleted = false;
+      }
+      return;
+    }
+    this.emit(event);
   }
 
   private handleMessageUpdate(
@@ -1604,12 +1870,16 @@ export class PiRpcAgentClient implements AgentClient {
 
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
+  private readonly providerParams: PiProviderParams;
   private readonly runtime: PiRuntime;
 
   constructor(options: PiRpcAgentClientOptions) {
     this.logger = options.logger;
     this.runtimeSettings = options.runtimeSettings;
-    this.runtime = options.runtime ?? createRuntime(options.logger, options.runtimeSettings);
+    this.providerParams = PiProviderParamsSchema.parse(options.providerParams ?? {});
+    this.runtime =
+      options.runtime ??
+      createRuntime(options.logger, options.runtimeSettings, options.commandsRpcType);
   }
 
   async createSession(
@@ -1645,6 +1915,7 @@ export class PiRpcAgentClient implements AgentClient {
         initialState: await runtimeSession.getState(),
         capabilities: withPiMcpCapability(mcpConfig !== null),
         cleanup: combineCleanup([mcpConfig?.cleanup, paseoExtension.cleanup]),
+        extensionTimeoutMs: this.providerParams.extensionTimeoutMs,
       });
     } catch (error) {
       await runtimeSession.close().catch(() => undefined);
@@ -1695,6 +1966,7 @@ export class PiRpcAgentClient implements AgentClient {
         initialState: await runtimeSession.getState(),
         capabilities: withPiMcpCapability(mcpConfig !== null),
         cleanup: combineCleanup([mcpConfig?.cleanup, paseoExtension.cleanup]),
+        extensionTimeoutMs: this.providerParams.extensionTimeoutMs,
       });
     } catch (error) {
       await runtimeSession.close().catch(() => undefined);
@@ -1704,41 +1976,52 @@ export class PiRpcAgentClient implements AgentClient {
     }
   }
 
-  async listModels(options: ListModelsOptions): Promise<AgentModelDefinition[]> {
-    const runtimeSession = await this.runtime.startSession({ cwd: options.cwd });
+  async fetchCatalog(options: FetchCatalogOptions): Promise<ProviderCatalog> {
+    const runtimeSession = await this.runtime.startSession({
+      cwd: options.scope === "global" ? homedir() : options.cwd,
+    });
     try {
-      return transformPiModels((await runtimeSession.getAvailableModels()).map(mapPiModel));
+      const models = transformPiModels(
+        (await runtimeSession.getAvailableModels(PI_CATALOG_REQUEST_TIMEOUT_MS)).map(mapPiModel),
+      );
+      return { models, modes: [] };
     } finally {
       await runtimeSession.close();
     }
   }
 
-  async listModes(_options: ListModesOptions): Promise<AgentMode[]> {
+  async listFeatures(_config: AgentSessionConfig): Promise<AgentFeature[]> {
     return [];
   }
 
-  async listPersistedAgents(
-    _options?: ListPersistedAgentsOptions,
-  ): Promise<PersistedAgentDescriptor[]> {
-    return [];
+  async listImportableSessions(
+    options?: ListImportableSessionsOptions,
+  ): Promise<ImportableProviderSession[]> {
+    return await listPiImportableSessions({
+      ...options,
+      sessionDir: this.providerParams.sessionDir,
+      runtimeSettings: this.runtimeSettings,
+    });
+  }
+
+  async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
+    const importConfig = await readPiImportSessionConfig(input.providerHandleId);
+    return importSessionFromPersistence({
+      provider: PI_PROVIDER,
+      request: input,
+      context,
+      resumeSession: this.resumeSession.bind(this),
+      config: importConfig,
+    });
   }
 
   async isAvailable(): Promise<boolean> {
-    const launch = await this.resolvePiLaunch();
-    const availability = await checkProviderLaunchAvailable(launch);
-    if (!availability.available) {
-      return false;
-    }
-    const runtimeSession = await this.runtime.startSession({ cwd: homedir() }).catch(() => null);
-    if (!runtimeSession) {
-      return false;
-    }
     try {
-      return (await runtimeSession.getAvailableModels()).length > 0;
+      const launch = await this.resolvePiLaunch();
+      const availability = await checkProviderLaunchAvailable(launch);
+      return availability.available;
     } catch {
       return false;
-    } finally {
-      await runtimeSession.close().catch(() => undefined);
     }
   }
 
@@ -1746,60 +2029,18 @@ export class PiRpcAgentClient implements AgentClient {
     try {
       const launch = await this.resolvePiLaunch();
       const availability = await checkProviderLaunchAvailable(launch);
-      const available = availability.available;
       const authConfigPath = join(homedir(), ".pi", "agent", "auth.json");
-      let modelsValue = "Not checked";
-      let configuredProvidersValue = "none";
-      let mcpToolsValue = "Not checked";
-      let status = formatDiagnosticStatus(available);
-
-      if (availability.available) {
-        const runtimeSession = await this.runtime
-          .startSession({ cwd: homedir() })
-          .catch((error) => {
-            status = formatDiagnosticStatus(false, {
-              source: "startup",
-              cause: error,
-            });
-            return null;
-          });
-        if (runtimeSession) {
-          try {
-            const models = await runtimeSession.getAvailableModels();
-            modelsValue = String(models.length);
-            const configuredProviders = Array.from(
-              new Set(models.map((model) => model.provider)),
-            ).sort();
-            configuredProvidersValue =
-              configuredProviders.length > 0 ? configuredProviders.join(", ") : "none";
-            const commands = await runtimeSession.getCommands();
-            mcpToolsValue = commands.some(isPiMcpAdapterCommand)
-              ? "yes (pi-mcp-adapter loaded)"
-              : "no (install pi-mcp-adapter)";
-          } catch (error) {
-            modelsValue = `Error - ${toDiagnosticErrorMessage(error)}`;
-            mcpToolsValue = `Error - ${toDiagnosticErrorMessage(error)}`;
-            status = formatDiagnosticStatus(available, {
-              source: "model fetch",
-              cause: error,
-            });
-          } finally {
-            await runtimeSession.close().catch(() => undefined);
-          }
-        }
-      }
 
       return {
         diagnostic: formatProviderDiagnostic("Pi", [
+          ...(await buildCommandResolutionDiagnosticRows(launch, {
+            knownBinaryNames: [launch.command],
+          })),
           ...(await buildBinaryDiagnosticRows(launch, availability)),
-          { label: "Configured providers", value: configuredProvidersValue },
           {
             label: "Auth config (~/.pi/agent/auth.json)",
             value: existsSync(authConfigPath) ? "found" : "not found",
           },
-          { label: "Models", value: modelsValue },
-          { label: "Paseo MCP tools", value: mcpToolsValue },
-          { label: "Status", value: status },
         ]),
       };
     } catch (error) {

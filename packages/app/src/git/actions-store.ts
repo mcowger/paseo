@@ -1,7 +1,7 @@
 import type { QueryKey } from "@tanstack/react-query";
 import type { CheckoutPrMergeMethod } from "@getpaseo/protocol/messages";
 import { create } from "zustand";
-import { queryClient as appQueryClient } from "@/query/query-client";
+import { queryClient as appQueryClient } from "@/data/query-client";
 import {
   buildWorkspaceTabPersistenceKey,
   useWorkspaceLayoutStore,
@@ -13,11 +13,9 @@ import {
   clearWorkspaceArchivePending,
   markWorkspaceArchivePending,
 } from "@/contexts/session-workspace-upserts";
-import {
-  resolveWorkspaceIdByExecutionDirectory,
-  resolveWorkspaceMapKeyByIdentity,
-} from "@/utils/workspace-execution";
+import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 import { invalidateCheckoutGitQueriesForClient } from "@/git/query-keys";
+import { i18n } from "@/i18n/i18next";
 
 const SUCCESS_DISPLAY_MS = 1000;
 
@@ -52,7 +50,7 @@ function resolveClient(serverId: string) {
   const session = useSessionStore.getState().sessions[serverId];
   const client = session?.client ?? null;
   if (!client) {
-    throw new Error("Daemon client unavailable");
+    throw new Error(i18n.t("common.errors.daemonClientUnavailable"));
   }
   return client;
 }
@@ -154,15 +152,12 @@ function isWorktreeListQuery(input: { queryKey: QueryKey; serverId: string }): b
 
 function snapshotWorktreeArchiveState(input: {
   serverId: string;
-  worktreePath: string;
+  workspaceId: string | undefined;
 }): WorktreeArchiveSnapshot {
   const workspaces = useSessionStore.getState().sessions[input.serverId]?.workspaces;
-  const workspaceId =
-    resolveWorkspaceIdByExecutionDirectory({
-      workspaces: workspaces?.values(),
-      workspaceDirectory: input.worktreePath,
-    }) ?? input.worktreePath;
-  const workspaceKey = resolveWorkspaceMapKeyByIdentity({ workspaces, workspaceId });
+  const workspaceKey = input.workspaceId
+    ? resolveWorkspaceMapKeyByIdentity({ workspaces, workspaceId: input.workspaceId })
+    : null;
   return {
     workspace: workspaceKey ? (workspaces?.get(workspaceKey) ?? null) : null,
     worktreeLists: appQueryClient.getQueriesData({
@@ -172,13 +167,13 @@ function snapshotWorktreeArchiveState(input: {
   };
 }
 
-function removeWorktreeFromSessionStore(input: { serverId: string; worktreePath: string }): void {
+function removeWorktreeFromSessionStore(input: { serverId: string; workspaceId: string }): void {
   const serverId = input.serverId.trim();
-  const worktreePath = input.worktreePath.trim();
-  if (!serverId || !worktreePath) {
+  const workspaceId = input.workspaceId.trim();
+  if (!serverId || !workspaceId) {
     return;
   }
-  useSessionStore.getState().removeWorkspace(serverId, worktreePath);
+  useSessionStore.getState().removeWorkspace(serverId, workspaceId);
 }
 
 function restoreWorktreeArchiveState(input: {
@@ -194,9 +189,9 @@ function restoreWorktreeArchiveState(input: {
   }
 }
 
-function purgeArchivedWorkspaceState(input: { serverId: string; worktreePath: string }): void {
+function purgeArchivedWorkspaceState(input: { serverId: string; workspaceId: string }): void {
   const serverId = input.serverId.trim();
-  const workspaceId = input.worktreePath.trim();
+  const workspaceId = input.workspaceId.trim();
   if (!serverId || !workspaceId) {
     return;
   }
@@ -256,6 +251,7 @@ interface CheckoutGitActionsStoreState {
     serverId: string;
     cwd: string;
     worktreePath: string;
+    workspaceId?: string;
   }) => Promise<void>;
 }
 
@@ -495,39 +491,46 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
     });
   },
 
-  archiveWorktree: async ({ serverId, cwd, worktreePath }) => {
+  archiveWorktree: async ({ serverId, cwd, worktreePath, workspaceId }) => {
     await runCheckoutAction({
       serverId,
       cwd,
       actionId: "archive-worktree",
       run: async () => {
         const client = resolveClient(serverId);
-        const snapshot = snapshotWorktreeArchiveState({ serverId, worktreePath });
-        markWorkspaceArchivePending({
-          serverId,
-          workspaceId: snapshot.workspace?.id ?? worktreePath,
-          workspaceDirectory: snapshot.workspace?.workspaceDirectory ?? worktreePath,
-        });
+        const snapshot = snapshotWorktreeArchiveState({ serverId, workspaceId });
+        // The server archive is keyed by worktreePath and must always run. The
+        // optimistic client-side updates are keyed by workspace id, so they only
+        // apply when the caller passes the workspace id and it resolves in the
+        // local store.
+        const workspace = snapshot.workspace;
+        if (workspace) {
+          markWorkspaceArchivePending({
+            serverId,
+            workspaceId: workspace.id,
+          });
+          removeWorktreeFromSessionStore({ serverId, workspaceId: workspace.id });
+        }
         removeWorktreeFromCachedLists({ serverId, worktreePath });
-        removeWorktreeFromSessionStore({
-          serverId,
-          worktreePath: snapshot.workspace?.id ?? worktreePath,
-        });
         try {
-          const payload = await client.archivePaseoWorktree({ worktreePath });
+          const payload = await client.archivePaseoWorktree({
+            worktreePath,
+            ...(workspaceId !== undefined ? { workspaceId } : {}),
+          });
           if (payload.error) {
             throw new Error(payload.error.message);
           }
         } catch (error) {
-          clearWorkspaceArchivePending({
-            serverId,
-            workspaceId: snapshot.workspace?.id ?? worktreePath,
-          });
+          if (workspace) {
+            clearWorkspaceArchivePending({ serverId, workspaceId: workspace.id });
+          }
           restoreWorktreeArchiveState({ serverId, snapshot });
           throw error;
         }
         invalidateWorktreeList();
-        purgeArchivedWorkspaceState({ serverId, worktreePath });
+        if (workspace) {
+          purgeArchivedWorkspaceState({ serverId, workspaceId: workspace.id });
+        }
       },
     });
   },

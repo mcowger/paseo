@@ -20,13 +20,15 @@ import type {
   AgentSessionConfig,
   AgentStreamEvent,
   AgentTimelineItem,
-  ListModesOptions,
-  ListModelsOptions,
-  ListPersistedAgentsOptions,
-  PersistedAgentDescriptor,
+  FetchCatalogOptions,
+  ImportableProviderSession,
+  ImportProviderSessionContext,
+  ImportProviderSessionInput,
+  ProviderCatalog,
   ToolCallDetail,
   ToolCallTimelineItem,
 } from "../agent-sdk-types.js";
+import { importSessionFromPersistence } from "../provider-session-import.js";
 import { getAgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 
 export const MOCK_LOAD_TEST_PROVIDER_ID = "mock";
@@ -38,6 +40,7 @@ const MOCK_LOAD_TEST_INTERVAL_MS = 40;
 const CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
+  supportsSessionListing: true,
   supportsDynamicModes: false,
   supportsMcpServers: false,
   supportsReasoningStream: true,
@@ -94,6 +97,7 @@ const MODELS: AgentModelDefinition[] = [
 
 interface ActiveTurn {
   turnId: string;
+  assistantMessageId: string;
   prompt: AgentPromptInput;
   startedAt: number;
   cycle: number;
@@ -124,12 +128,80 @@ interface AgentStreamStressRequest {
   coalesced: boolean;
 }
 
+interface MockQuestionOption {
+  label: string;
+  description?: string;
+}
+
+interface MockQuestionPromptQuestion {
+  question: string;
+  header: string;
+  options: MockQuestionOption[];
+  multiSelect: boolean;
+  allowOther?: boolean;
+  allowEmpty?: boolean;
+  placeholder?: string;
+  dismissLabel?: string;
+}
+
+interface MockQuestionPromptRequest {
+  questions: MockQuestionPromptQuestion[];
+}
+
 function shouldEmitPlanApprovalPrompt(prompt: AgentPromptInput): boolean {
   return /emit\s+(?:a\s+)?synthetic\s+plan\s+approval/i.test(promptToText(prompt));
 }
 
-function shouldEmitQuestionPrompt(prompt: AgentPromptInput): boolean {
-  return /emit\s+(?:a\s+)?synthetic\s+questions?/i.test(promptToText(prompt));
+function parseMockQuestionPrompt(prompt: AgentPromptInput): MockQuestionPromptRequest | null {
+  const text = promptToText(prompt);
+  if (!/emit\s+(?:a\s+)?synthetic\s+questions?/i.test(text)) {
+    return null;
+  }
+
+  if (/free[-\s]?write|freeform|text[-\s]?only/i.test(text)) {
+    return {
+      questions: [
+        {
+          question: "What is the GitHub private repo URL to push to?",
+          header: "repoUrl",
+          options: [],
+          multiSelect: false,
+          placeholder: "git@github.com:user/repo.git",
+        },
+        {
+          question: "What should the first commit message be?",
+          header: "commitMessage",
+          options: [],
+          multiSelect: false,
+          placeholder: "Initial commit",
+        },
+      ],
+    };
+  }
+
+  return {
+    questions: [
+      {
+        question: "Which surface should this apply to?",
+        header: "surface",
+        options: [{ label: "App" }, { label: "Desktop" }],
+        multiSelect: false,
+      },
+      {
+        question: "Which rollout should we use?",
+        header: "rollout",
+        options: [{ label: "Immediately" }, { label: "Behind feature flag" }],
+        multiSelect: false,
+      },
+      {
+        question: "What success criteria should we use?",
+        header: "success",
+        options: [],
+        multiSelect: false,
+        placeholder: "Describe success...",
+      },
+    ],
+  };
 }
 
 function resolveModelProfile(modelId: string | null | undefined): {
@@ -197,6 +269,50 @@ function parseAgentStreamStressPrompt(prompt: AgentPromptInput): AgentStreamStre
     count: Math.min(count, 5_000),
     coalesced: Boolean(match[2]),
   };
+}
+
+function parseStructuredBranchNamePrompt(
+  prompt: AgentPromptInput,
+): { title: string; branch: string } | null {
+  const text = promptToText(prompt);
+  const hasBranchNamePrompt =
+    text.includes("Generate a title and a git branch name for a coding agent") &&
+    (text.includes("Return JSON only with fields 'title' and 'branch'.") ||
+      text.includes('"title"') ||
+      text.includes('"branch"'));
+  if (
+    !hasBranchNamePrompt &&
+    !(
+      text.includes("You must respond with JSON only that matches this JSON Schema") &&
+      text.includes('"title"') &&
+      text.includes('"branch"')
+    )
+  ) {
+    return null;
+  }
+
+  const seed =
+    text.match(/<user-prompt>\n([\s\S]*?)\n<\/user-prompt>/)?.[1]?.trim() ??
+    text.match(/<attachments>\n([\s\S]*?)\n<\/attachments>/)?.[1]?.trim() ??
+    "";
+  const firstLine =
+    seed
+      .split("\n")
+      .find((line) => line.trim().length > 0)
+      ?.trim() ?? "Mock task";
+  const title = firstLine
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 80)
+    .trim();
+  const branch =
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 100) || "mock-task";
+
+  return { title: title || "Mock task", branch };
 }
 
 function buildRepeatedPayload(bytes: number, prefix: string): string {
@@ -419,18 +535,24 @@ export class MockLoadTestAgentClient implements AgentClient {
     });
   }
 
-  async listModels(_options: ListModelsOptions): Promise<AgentModelDefinition[]> {
-    return MODELS;
+  async fetchCatalog(_options: FetchCatalogOptions): Promise<ProviderCatalog> {
+    return {
+      models: MODELS,
+      modes: getAgentProviderDefinition(MOCK_LOAD_TEST_PROVIDER_ID).modes,
+    };
   }
 
-  async listModes(_options: ListModesOptions): Promise<AgentMode[]> {
-    return getAgentProviderDefinition(MOCK_LOAD_TEST_PROVIDER_ID).modes;
-  }
-
-  async listPersistedAgents(
-    _options?: ListPersistedAgentsOptions,
-  ): Promise<PersistedAgentDescriptor[]> {
+  async listImportableSessions(): Promise<ImportableProviderSession[]> {
     return [];
+  }
+
+  async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
+    return importSessionFromPersistence({
+      provider: MOCK_LOAD_TEST_PROVIDER_ID,
+      request: input,
+      context,
+      resumeSession: this.resumeSession.bind(this),
+    });
   }
 
   async isAvailable(): Promise<boolean> {
@@ -488,12 +610,14 @@ export class MockLoadTestAgentSession implements AgentSession {
 
     const profile = resolveModelProfile(this.modelId);
     const turnId = randomUUID();
+    const assistantMessageId = randomUUID();
     let resolve!: (result: AgentRunResult) => void;
     const completed = new Promise<AgentRunResult>((promiseResolve) => {
       resolve = promiseResolve;
     });
     const turn: ActiveTurn = {
       turnId,
+      assistantMessageId,
       prompt,
       startedAt: Date.now(),
       cycle: 0,
@@ -526,10 +650,14 @@ export class MockLoadTestAgentSession implements AgentSession {
 
     const largePayload = parseLargeAgentStreamPayloadPrompt(prompt);
     const stress = parseAgentStreamStressPrompt(prompt);
-    if (shouldEmitPlanApprovalPrompt(prompt)) {
+    const questionPrompt = parseMockQuestionPrompt(prompt);
+    const structuredBranchName = parseStructuredBranchNamePrompt(prompt);
+    if (structuredBranchName) {
+      this.scheduleStructuredJsonTurn(turn, structuredBranchName);
+    } else if (shouldEmitPlanApprovalPrompt(prompt)) {
       this.schedulePlanApprovalTurn(turn);
-    } else if (shouldEmitQuestionPrompt(prompt)) {
-      this.scheduleQuestionPromptTurn(turn);
+    } else if (questionPrompt) {
+      this.scheduleQuestionPromptTurn(turn, questionPrompt);
     } else if (largePayload) {
       this.scheduleLargePayloadTurn(turn, largePayload);
     } else if (stress) {
@@ -702,11 +830,59 @@ export class MockLoadTestAgentSession implements AgentSession {
     turn.timer.unref?.();
   }
 
-  private scheduleQuestionPromptTurn(turn: ActiveTurn): void {
+  private scheduleQuestionPromptTurn(
+    turn: ActiveTurn,
+    questionPrompt: MockQuestionPromptRequest,
+  ): void {
     turn.timer = setTimeout(() => {
-      this.emitQuestionPromptTurn(turn);
+      this.emitQuestionPromptTurn(turn, questionPrompt);
     }, 0);
     turn.timer.unref?.();
+  }
+
+  private scheduleStructuredJsonTurn(turn: ActiveTurn, result: Record<string, string>): void {
+    turn.timer = setTimeout(() => {
+      this.emitStructuredJsonTurn(turn, result);
+    }, 0);
+    turn.timer.unref?.();
+  }
+
+  private emitStructuredJsonTurn(turn: ActiveTurn, result: Record<string, string>): void {
+    if (this.activeTurn !== turn) {
+      return;
+    }
+
+    this.clearTurnTimer(turn);
+    this.emit({
+      type: "turn_started",
+      provider: this.provider,
+      turnId: turn.turnId,
+    });
+
+    const finalText = JSON.stringify(result);
+    this.emitTimeline(turn.turnId, {
+      type: "assistant_message",
+      text: finalText,
+      messageId: turn.assistantMessageId,
+    });
+    this.activeTurn = null;
+    this.emit({
+      type: "turn_completed",
+      provider: this.provider,
+      turnId: turn.turnId,
+    });
+    turn.resolve({
+      sessionId: this.id,
+      finalText,
+      timeline: [
+        {
+          type: "assistant_message",
+          text: finalText,
+          messageId: turn.assistantMessageId,
+        },
+      ],
+      canceled: false,
+    });
   }
 
   private emitPlanApprovalTurn(turn: ActiveTurn): void {
@@ -761,7 +937,10 @@ export class MockLoadTestAgentSession implements AgentSession {
     });
   }
 
-  private emitQuestionPromptTurn(turn: ActiveTurn): void {
+  private emitQuestionPromptTurn(
+    turn: ActiveTurn,
+    questionPrompt: MockQuestionPromptRequest,
+  ): void {
     if (this.activeTurn !== turn) {
       return;
     }
@@ -780,27 +959,7 @@ export class MockLoadTestAgentSession implements AgentSession {
       kind: "question",
       title: "Questions",
       input: {
-        questions: [
-          {
-            question: "Which surface should this apply to?",
-            header: "surface",
-            options: [{ label: "App" }, { label: "Desktop" }],
-            multiSelect: false,
-          },
-          {
-            question: "Which rollout should we use?",
-            header: "rollout",
-            options: [{ label: "Immediately" }, { label: "Behind feature flag" }],
-            multiSelect: false,
-          },
-          {
-            question: "What success criteria should we use?",
-            header: "success",
-            options: [],
-            multiSelect: false,
-            placeholder: "Describe success...",
-          },
-        ],
+        questions: questionPrompt.questions,
       },
       metadata: {
         source: "mock_questions",
@@ -835,6 +994,7 @@ export class MockLoadTestAgentSession implements AgentSession {
           ? {
               type: "assistant_message",
               text: `stress-update-${index}`,
+              messageId: turn.assistantMessageId,
             }
           : {
               type: "todo",
@@ -913,6 +1073,7 @@ export class MockLoadTestAgentSession implements AgentSession {
       this.emitTimeline(turn.turnId, {
         type: "assistant_message",
         text: `data:image/png;base64,${payload}`,
+        messageId: turn.assistantMessageId,
       });
     }
 
@@ -979,6 +1140,7 @@ export class MockLoadTestAgentSession implements AgentSession {
         this.emitTimeline(turn.turnId, {
           type: "assistant_message",
           text: event.text,
+          messageId: turn.assistantMessageId,
         });
         return;
       }
@@ -1024,6 +1186,7 @@ export class MockLoadTestAgentSession implements AgentSession {
     this.emitTimeline(turn.turnId, {
       type: "assistant_message",
       text: "\n\n_(end of synthetic stream)_\n",
+      messageId: turn.assistantMessageId,
     });
     this.finishTurnWithText(turn, "Synthetic load test complete");
   }

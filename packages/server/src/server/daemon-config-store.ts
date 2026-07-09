@@ -172,6 +172,7 @@ function mergeMutableConfigIntoPersistedConfig(params: {
   mutable: MutableDaemonConfig;
 }): PersistedConfig {
   const { persisted, mutable } = params;
+  const browserToolsEnabled = readBrowserToolsEnabled(mutable);
   const metadataGenerationProviders = readMetadataGenerationProviders(mutable);
   const providerOverrides = applyMutableProviderConfigToOverrides(
     persisted.agents?.providers as Record<string, ProviderOverride> | undefined,
@@ -208,11 +209,27 @@ function mergeMutableConfigIntoPersistedConfig(params: {
         ...persisted.daemon?.mcp,
         injectIntoAgents: mutable.mcp.injectIntoAgents,
       },
+      browserTools: {
+        ...persisted.daemon?.browserTools,
+        enabled: browserToolsEnabled,
+      },
       autoArchiveAfterMerge: mutable.autoArchiveAfterMerge,
+      enableTerminalAgentHooks: mutable.enableTerminalAgentHooks,
       appendSystemPrompt: mutable.appendSystemPrompt,
+      ...(mutable.terminalProfiles !== undefined
+        ? { terminalProfiles: mutable.terminalProfiles }
+        : {}),
     },
     agents: nextAgents,
   } as PersistedConfig;
+}
+
+function readBrowserToolsEnabled(mutable: MutableDaemonConfig): boolean {
+  const browserTools = mutable.browserTools;
+  if (!isRecord(browserTools)) {
+    return false;
+  }
+  return browserTools["enabled"] === true;
 }
 
 function readMetadataGenerationProviders(

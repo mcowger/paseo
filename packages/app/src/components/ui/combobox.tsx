@@ -23,6 +23,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
+import { useTranslation } from "react-i18next";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import {
@@ -60,10 +61,14 @@ import {
 } from "@/components/adaptive-modal-sheet";
 import { FloatingSurface } from "@/components/ui/floating";
 import { useDismissKeyboardOnOpen } from "@/components/ui/keyboard-dismiss";
+import { buildDesktopFrameStyle } from "./combobox-frame-style";
+
+export { buildDesktopFrameStyle } from "./combobox-frame-style";
 
 const IS_WEB = isWeb;
 
 export type ComboboxOption = ComboboxOptionModel;
+export type ComboboxDesktopPlacement = "top-start" | "bottom-start";
 
 export interface ComboboxProps {
   options: ComboboxOption[];
@@ -95,9 +100,10 @@ export interface ComboboxProps {
    */
   header?: SheetHeader;
   mobileChildrenScrollEnabled?: boolean;
+  presentation?: "push" | "replace";
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
-  desktopPlacement?: "top-start" | "bottom-start";
+  desktopPlacement?: ComboboxDesktopPlacement;
   /**
    * Prevents an initial frame at 0,0 by hiding desktop content until floating
    * coordinates resolve. This intentionally disables fade enter/exit animation
@@ -379,7 +385,7 @@ function OptionsList({
 interface DesktopPositionInput {
   isDesktopAboveSearch: boolean;
   isMobile: boolean;
-  desktopPlacement: "top-start" | "bottom-start";
+  desktopPlacement: ComboboxDesktopPlacement;
   referenceTop: number | null;
   referenceLeft: number | null;
   referenceAtOrigin: boolean;
@@ -654,7 +660,7 @@ interface DesktopResetSetters {
 function useDesktopPositionReset(
   isOpen: boolean,
   isMobile: boolean,
-  desktopPlacement: "top-start" | "bottom-start",
+  desktopPlacement: ComboboxDesktopPlacement,
   update: () => unknown,
   setters: DesktopResetSetters,
 ) {
@@ -848,46 +854,6 @@ function buildFloatingMiddleware(input: FloatingMiddlewareInput) {
   ];
 }
 
-interface DesktopContainerStyleInput {
-  desktopMinWidth: number | undefined;
-  referenceWidth: number | null;
-  desktopFixedHeight: number | undefined;
-  desktopPositionStyle: DesktopPositionResult["desktopPositionStyle"];
-  shouldHideDesktopContent: boolean;
-  availableHeight: number | undefined;
-}
-
-function buildDesktopFrameStyle(input: DesktopContainerStyleInput): StyleProp<ViewStyle> {
-  const {
-    desktopMinWidth,
-    referenceWidth,
-    desktopFixedHeight,
-    desktopPositionStyle,
-    shouldHideDesktopContent,
-    availableHeight,
-  } = input;
-  const fixedHeightStyle =
-    desktopFixedHeight != null
-      ? { minHeight: desktopFixedHeight, maxHeight: desktopFixedHeight }
-      : null;
-  const hiddenStyle = shouldHideDesktopContent ? { opacity: 0 } : null;
-  const availableHeightStyle =
-    typeof availableHeight === "number"
-      ? { maxHeight: Math.min(availableHeight, desktopFixedHeight ?? 400) }
-      : null;
-  return [
-    {
-      position: "absolute" as const,
-      minWidth: desktopMinWidth ?? referenceWidth ?? 200,
-      maxWidth: Math.max(400, desktopMinWidth ?? 0),
-    },
-    fixedHeightStyle,
-    desktopPositionStyle,
-    hiddenStyle,
-    availableHeightStyle,
-  ];
-}
-
 function isDesktopKey(key: string): key is DesktopKey {
   return key === "ArrowDown" || key === "ArrowUp" || key === "Enter" || key === "Escape";
 }
@@ -965,6 +931,7 @@ interface MobileBodyProps {
   searchable: boolean;
   hasChildren: boolean;
   mobileChildrenScrollEnabled: boolean;
+  presentation?: "push" | "replace";
   searchResetKey: number;
   searchPlaceholder: string;
   searchQuery: string;
@@ -1024,6 +991,7 @@ function MobileComboboxBody(props: MobileBodyProps): ReactElement {
       handleIndicatorStyle={props.handleIndicatorStyle}
       keyboardBehavior="extend"
       keyboardBlurBehavior="none"
+      presentation={props.presentation}
     >
       {props.header ? (
         <SheetHeaderView header={props.header} onClose={props.onClose} />
@@ -1237,20 +1205,21 @@ export function Combobox({
   renderOption,
   onSearchQueryChange,
   searchable = true,
-  placeholder = "Search...",
+  placeholder,
   searchPlaceholder,
-  emptyText = "No options match your search.",
+  emptyText,
   allowCustomValue = false,
   customValuePrefix = "Use",
   customValueDescription,
   customValueKind,
   optionsPosition = "below-search",
-  title = "Select",
+  title,
   header,
   mobileChildrenScrollEnabled = true,
+  presentation,
   open,
   onOpenChange,
-  desktopPlacement = "top-start",
+  desktopPlacement = "bottom-start",
   desktopPreventInitialFlash = true,
   desktopMinWidth,
   desktopFixedHeight,
@@ -1259,7 +1228,11 @@ export function Combobox({
   anchorRef,
   children,
 }: ComboboxProps): ReactElement | null {
+  const { t } = useTranslation();
   const { theme } = useUnistyles();
+  const resolvedPlaceholder = placeholder ?? t("common.placeholders.search");
+  const resolvedEmptyText = emptyText ?? t("common.empty.noOptionsMatchSearch");
+  const resolvedTitle = title ?? t("common.actions.select");
   const isMobile = useIsCompactFormFactor();
   const titleColor = theme.colors.foreground;
   const effectiveOptionsPosition = resolveEffectiveOptionsPosition(isMobile, optionsPosition);
@@ -1515,7 +1488,7 @@ export function Combobox({
     [],
   );
 
-  const effectiveSearchPlaceholder = searchPlaceholder ?? placeholder;
+  const effectiveSearchPlaceholder = searchPlaceholder ?? resolvedPlaceholder;
   const hasChildren = Boolean(children);
 
   if (isMobile) {
@@ -1527,13 +1500,14 @@ export function Combobox({
         handleSheetDismiss={handleSheetDismiss}
         handleIndicatorStyle={handleIndicatorStyle}
         titleColor={titleColor}
-        title={title}
+        title={resolvedTitle}
         header={header}
         onClose={handleClose}
         stickyHeader={stickyHeader}
         searchable={searchable}
         hasChildren={hasChildren}
         mobileChildrenScrollEnabled={mobileChildrenScrollEnabled}
+        presentation={presentation}
         searchResetKey={searchResetKey}
         searchPlaceholder={effectiveSearchPlaceholder}
         searchQuery={searchQuery}
@@ -1542,7 +1516,7 @@ export function Combobox({
         orderedVisibleOptions={orderedVisibleOptions}
         value={value}
         activeIndex={activeIndex}
-        emptyText={emptyText}
+        emptyText={resolvedEmptyText}
         handleSelect={handleSelect}
         renderOption={renderOption}
       >
@@ -1575,7 +1549,7 @@ export function Combobox({
       orderedVisibleOptions={orderedVisibleOptions}
       value={value}
       activeIndex={activeIndex}
-      emptyText={emptyText}
+      emptyText={resolvedEmptyText}
       handleSelect={handleSelect}
       renderOption={renderOption}
       hasChildren={hasChildren}

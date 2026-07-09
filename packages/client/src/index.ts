@@ -30,6 +30,8 @@ export { DaemonClient };
 export type {
   DaemonClientConfig,
   DaemonEvent,
+  BrowserAutomationExecuteRequestMessage,
+  BrowserAutomationExecuteResponseMessage,
   WebSocketFactory,
   WebSocketLike,
 } from "./daemon-client.js";
@@ -229,6 +231,7 @@ export interface PaseoAgentHandle {
   refetch(requestId?: string): Promise<PaseoAgentRefetchResult | null>;
   send(text: string, options?: PaseoAgentSendOptions): Promise<void>;
   archive(): Promise<{ archivedAt: string }>;
+  detach(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
 }
 
@@ -414,9 +417,11 @@ function createWorkspaceHandleFactory(daemonClient: DaemonClient): WorkspaceHand
       id,
       latest: () => latest,
       refetch: async (options) => {
+        // Best-effort: fetches one page and matches by id client-side, so a workspace beyond
+        // the first page won't be found. TODO: add a "get workspace by id" lookup and resolve
+        // by exact id instead of paging.
         const result = await daemonClient.fetchWorkspaces({
           requestId: options?.requestId,
-          filter: { idPrefix: id },
           page: { limit: 25 },
         });
         latest = result.entries.find((entry) => entry.id === id) ?? null;
@@ -469,7 +474,7 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
       },
       latest: () => latest,
       refetch: async (requestId) => {
-        const result = await daemonClient.fetchAgent(id, requestId);
+        const result = await daemonClient.fetchAgent({ agentId: id, requestId });
         latest = result?.agent ?? null;
         return result;
       },
@@ -480,6 +485,9 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
           latest = { ...latest, archivedAt: result.archivedAt };
         }
         return result;
+      },
+      detach: async () => {
+        await daemonClient.detachAgent(id);
       },
       subscribe: (handler) =>
         daemonClient.on("agent_update", (message) => {

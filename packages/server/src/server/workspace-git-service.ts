@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { LRUCache } from "lru-cache";
 import pLimit from "p-limit";
 import type pino from "pino";
@@ -38,9 +38,9 @@ import {
   buildWorkspaceGitMetadataFromSnapshot,
   type WorkspaceGitMetadata,
 } from "./workspace-git-metadata.js";
-import { checkoutLiteFromGitSnapshot, normalizeWorkspaceId } from "./workspace-registry-model.js";
+import { checkoutLiteFromGitSnapshot } from "./workspace-registry-model.js";
 
-const WORKSPACE_GIT_WATCH_DEBOUNCE_MS = 500;
+const WORKSPACE_GIT_WATCH_DEBOUNCE_MS = 1_000;
 const BACKGROUND_GIT_FETCH_INTERVAL_MS = 180_000;
 export const WORKSPACE_GIT_SELF_HEAL_INTERVAL_MS = 60_000;
 const WORKING_TREE_WATCH_FALLBACK_REFRESH_MS = 5_000;
@@ -158,6 +158,7 @@ export interface WorkspaceGitService {
     onChange: () => void,
   ): Promise<{ repoRoot: string | null; unsubscribe: () => void }>;
   scheduleRefreshForCwd(cwd: string): void;
+  onWorkspaceStateMayHaveChanged(cwd: string): void;
   dispose(): void;
 }
 
@@ -217,11 +218,10 @@ interface WorkspaceGitRefreshRequest {
   notify: boolean;
 }
 
-interface QueuedWorkspaceGitRefresh {
-  force: boolean;
-  includeGitHub: boolean;
-  reason: string;
-  notify: boolean;
+interface ScheduledWorkspaceGitRefreshOptions {
+  force?: boolean;
+  includeGitHub?: boolean;
+  reason?: string;
 }
 
 type WorkspaceGitRefreshState =
@@ -233,7 +233,7 @@ type WorkspaceGitRefreshState =
       promise: Promise<WorkspaceGitRuntimeSnapshot>;
       force: boolean;
       includeGitHub: boolean;
-      queued: QueuedWorkspaceGitRefresh | null;
+      queued: WorkspaceGitRefreshRequest | null;
     };
 
 interface WorkspaceGitServiceDependencies {
@@ -268,6 +268,7 @@ interface WorkspaceGitTarget {
   listeners: Set<WorkspaceGitListener>;
   watchers: FSWatcher[];
   debounceTimer: NodeJS.Timeout | null;
+  pendingDebounceRequest: WorkspaceGitRefreshRequest | null;
   selfHealTimer: NodeJS.Timeout | null;
   githubPollSubscription: { unsubscribe: () => void } | null;
   githubPollKey: string | null;
@@ -400,7 +401,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     params: { cwd: string },
     listener: WorkspaceGitListener,
   ): WorkspaceGitSubscription {
-    const cwd = normalizeWorkspaceId(params.cwd);
+    const cwd = resolve(params.cwd);
     const target = this.ensureWorkspaceTarget(cwd);
     target.listeners.add(listener);
     if (target.listeners.size === 1) {
@@ -431,7 +432,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     cwd: string,
     options?: WorkspaceGitSnapshotOptions,
   ): Promise<WorkspaceGitRuntimeSnapshot> {
-    cwd = normalizeWorkspaceId(cwd);
+    cwd = resolve(cwd);
     const request = this.normalizeRefreshRequest(options, "getSnapshot", true);
     const target = this.ensureWorkspaceTarget(cwd);
     if (!request.force && target.latestSnapshot) {
@@ -442,7 +443,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   async getCheckout(cwd: string): Promise<ProjectCheckoutLitePayload> {
-    const normalizedCwd = normalizeWorkspaceId(cwd);
+    const normalizedCwd = resolve(cwd);
     try {
       const status = await this.deps.getCheckoutStatus(normalizedCwd, {
         paseoHome: this.paseoHome,
@@ -480,7 +481,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   peekSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot | null {
-    cwd = normalizeWorkspaceId(cwd);
+    cwd = resolve(cwd);
     return this.workspaceTargets.get(cwd)?.latestSnapshot ?? null;
   }
 
@@ -489,7 +490,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     options: CheckoutDiffCompare,
     readOptions?: WorkspaceGitReadOptions,
   ): Promise<CheckoutDiffResult> {
-    const normalizedCwd = normalizeWorkspaceId(cwd);
+    const normalizedCwd = resolve(cwd);
     const normalizedOptions = this.normalizeCheckoutDiffOptions(options);
     const key = this.buildCheckoutDiffCacheKey(normalizedCwd, normalizedOptions);
     return this.readAuxiliaryCache(this.checkoutDiffCache, key, readOptions, () =>
@@ -529,7 +530,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     ref: string,
     options?: WorkspaceGitReadOptions,
   ): Promise<WorkspaceGitBranchValidationResult> {
-    const normalizedCwd = normalizeWorkspaceId(cwd);
+    const normalizedCwd = resolve(cwd);
     const normalizedRef = ref.trim();
     const key = JSON.stringify(["branch-validation", normalizedCwd, normalizedRef]);
     return this.readAuxiliaryCache(this.branchValidationCache, key, options, () =>
@@ -538,7 +539,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   hasLocalBranch(cwd: string, branch: string, options?: WorkspaceGitReadOptions): Promise<boolean> {
-    const normalizedCwd = normalizeWorkspaceId(cwd);
+    const normalizedCwd = resolve(cwd);
     const normalizedBranch = branch.trim();
     const ref = `refs/heads/${normalizedBranch}`;
     const key = JSON.stringify(["local-branch", normalizedCwd, ref]);
@@ -557,7 +558,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     options?: WorkspaceGitBranchSuggestionsOptions,
     readOptions?: WorkspaceGitReadOptions,
   ): Promise<WorkspaceGitBranchSuggestion[]> {
-    const normalizedCwd = normalizeWorkspaceId(cwd);
+    const normalizedCwd = resolve(cwd);
     const query = options?.query ?? "";
     const limit = options?.limit;
     const key = JSON.stringify(["branch-suggestions", normalizedCwd, query, limit ?? null]);
@@ -571,7 +572,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     options?: WorkspaceGitStashListOptions,
     readOptions?: WorkspaceGitReadOptions,
   ): Promise<WorkspaceGitStashEntry[]> {
-    const normalizedCwd = normalizeWorkspaceId(cwd);
+    const normalizedCwd = resolve(cwd);
     const paseoOnly = options?.paseoOnly !== false;
     const key = JSON.stringify(["stashes", normalizedCwd, paseoOnly]);
     return this.readAuxiliaryCache(this.stashListCache, key, readOptions, async () => {
@@ -605,15 +606,15 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     }
 
     return snapshot.git.isPaseoOwnedWorktree
-      ? (snapshot.git.mainRepoRoot ?? snapshot.git.repoRoot ?? normalizeWorkspaceId(cwd))
-      : (snapshot.git.repoRoot ?? normalizeWorkspaceId(cwd));
+      ? (snapshot.git.mainRepoRoot ?? snapshot.git.repoRoot ?? resolve(cwd))
+      : (snapshot.git.repoRoot ?? resolve(cwd));
   }
 
   async resolveDefaultBranch(
     cwdOrRepoRoot: string,
     options?: WorkspaceGitReadOptions,
   ): Promise<string> {
-    const cwd = normalizeWorkspaceId(cwdOrRepoRoot);
+    const cwd = resolve(cwdOrRepoRoot);
     const key = JSON.stringify(["default-branch", cwd]);
     return this.readAuxiliaryCache(this.defaultBranchCache, key, options, async () => {
       const defaultBranch = await this.deps.resolveRepositoryDefaultBranch(cwd);
@@ -629,10 +630,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     options?: WorkspaceGitReadOptions & { directoryName?: string },
   ): Promise<WorkspaceGitMetadata> {
     const snapshot = await this.getSnapshot(cwd, options);
-    const directoryName =
-      options?.directoryName ?? normalizeWorkspaceId(cwd).split(/[\\/]/).findLast(Boolean) ?? cwd;
+    const directoryName = options?.directoryName ?? basename(cwd) ?? cwd;
     return buildWorkspaceGitMetadataFromSnapshot({
-      cwd: normalizeWorkspaceId(cwd),
+      cwd: resolve(cwd),
       directoryName,
       isGit: snapshot.git.isGit,
       repoRoot: snapshot.git.repoRoot,
@@ -651,7 +651,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   async refresh(cwd: string, _options?: { priority?: "normal" | "high" }): Promise<void> {
-    cwd = normalizeWorkspaceId(cwd);
+    cwd = resolve(cwd);
     const target = this.ensureWorkspaceTarget(cwd);
     await this.refreshWorkspaceTarget(target, {
       force: false,
@@ -666,7 +666,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     cwd: string,
     onChange: () => void,
   ): Promise<{ repoRoot: string | null; unsubscribe: () => void }> {
-    cwd = normalizeWorkspaceId(cwd);
+    cwd = resolve(cwd);
     const target = await this.ensureWorkingTreeWatchTarget(cwd);
     target.listeners.add(onChange);
 
@@ -679,11 +679,25 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   scheduleRefreshForCwd(cwd: string): void {
-    cwd = normalizeWorkspaceId(cwd);
+    cwd = resolve(cwd);
     const target = this.workspaceTargets.get(cwd);
     if (target) {
       this.scheduleWorkspaceRefresh(target);
     }
+  }
+
+  onWorkspaceStateMayHaveChanged(cwd: string): void {
+    const normalizedCwd = resolve(cwd);
+    const target = this.workspaceTargets.get(normalizedCwd);
+    if (!target || target.closed) {
+      return;
+    }
+    this.deps.github.invalidate({ cwd: normalizedCwd });
+    this.scheduleWorkspaceRefresh(target, {
+      force: true,
+      includeGitHub: true,
+      reason: "external-state-change",
+    });
   }
 
   dispose(): void {
@@ -799,6 +813,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       listeners: new Set(),
       watchers: [],
       debounceTimer: null,
+      pendingDebounceRequest: null,
       selfHealTimer: null,
       githubPollSubscription: null,
       githubPollKey: null,
@@ -1100,15 +1115,21 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private scheduleWorkspaceRefresh(
     targetOrCwd: WorkspaceGitTarget | string,
-    options?: { force?: boolean; reason?: string },
+    options?: ScheduledWorkspaceGitRefreshOptions,
   ): void {
     const target =
       typeof targetOrCwd === "string"
-        ? this.workspaceTargets.get(normalizeWorkspaceId(targetOrCwd))
+        ? this.workspaceTargets.get(resolve(targetOrCwd))
         : targetOrCwd;
     if (!target || target.closed || this.workspaceTargets.get(target.cwd) !== target) {
       return;
     }
+
+    const request = this.buildScheduledRefreshRequest(options);
+    target.pendingDebounceRequest = this.mergeRefreshRequests(
+      target.pendingDebounceRequest,
+      request,
+    );
 
     if (target.debounceTimer) {
       clearTimeout(target.debounceTimer);
@@ -1119,12 +1140,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         return;
       }
       target.debounceTimer = null;
-      void this.refreshWorkspaceTarget(target, {
-        force: options?.force === true,
-        includeGitHub: false,
-        reason: options?.reason ?? "watch",
-        notify: true,
-      });
+      const merged = target.pendingDebounceRequest;
+      target.pendingDebounceRequest = null;
+      if (merged) {
+        void this.refreshWorkspaceTarget(target, merged);
+      }
     }, WORKSPACE_GIT_WATCH_DEBOUNCE_MS);
   }
 
@@ -1460,7 +1480,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       const needsGitHubRefresh =
         request.force && request.includeGitHub && !target.refreshState.includeGitHub;
       if (needsForcedRefresh || needsGitHubRefresh) {
-        target.refreshState.queued = this.mergeQueuedRefresh(target.refreshState.queued, request);
+        target.refreshState.queued = this.mergeRefreshRequests(target.refreshState.queued, request);
       }
       return target.refreshState.promise;
     }
@@ -1532,27 +1552,33 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     return this.deps.now().getTime() - target.lastShellOutAtMs < WORKSPACE_GIT_INTERNAL_MIN_GAP_MS;
   }
 
-  private mergeQueuedRefresh(
-    queued: QueuedWorkspaceGitRefresh | null,
+  private buildScheduledRefreshRequest(
+    options: ScheduledWorkspaceGitRefreshOptions | undefined,
+  ): WorkspaceGitRefreshRequest {
+    return {
+      force: options?.force === true,
+      includeGitHub: options?.includeGitHub ?? false,
+      reason: options?.reason ?? "watch",
+      notify: true,
+    };
+  }
+
+  private mergeRefreshRequests(
+    pending: WorkspaceGitRefreshRequest | null,
     request: WorkspaceGitRefreshRequest,
-  ): QueuedWorkspaceGitRefresh {
-    if (!queued) {
-      return {
-        force: request.force,
-        includeGitHub: request.includeGitHub,
-        reason: request.reason,
-        notify: request.notify,
-      };
+  ): WorkspaceGitRefreshRequest {
+    if (!pending) {
+      return request;
     }
 
-    const force = queued.force || request.force;
-    const upgradesForce = request.force && !queued.force;
-    const upgradesGitHub = request.includeGitHub && !queued.includeGitHub;
+    const force = pending.force || request.force;
+    const upgradesForce = request.force && !pending.force;
+    const upgradesGitHub = request.includeGitHub && !pending.includeGitHub;
     return {
       force,
-      includeGitHub: queued.includeGitHub || request.includeGitHub,
-      reason: upgradesForce || upgradesGitHub ? request.reason : queued.reason,
-      notify: queued.notify || request.notify,
+      includeGitHub: pending.includeGitHub || request.includeGitHub,
+      reason: upgradesForce || upgradesGitHub ? request.reason : pending.reason,
+      notify: pending.notify || request.notify,
     };
   }
 

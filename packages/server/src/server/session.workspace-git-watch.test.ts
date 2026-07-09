@@ -13,12 +13,13 @@ import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitService,
 } from "./workspace-git-service.js";
-import type { SessionOutboundMessage } from "./messages.js";
+import type { SessionOutboundMessage, WorkspaceDescriptorPayload } from "./messages.js";
 import {
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
 } from "./workspace-registry.js";
 import { createNoopWorkspaceGitService } from "./test-utils/workspace-git-service-stub.js";
+import type { WorkspaceGitObserverService } from "./session/workspace-git-observer/workspace-git-observer-service.js";
 
 interface SessionInternals {
   workspaceUpdatesSubscription: {
@@ -29,8 +30,21 @@ interface SessionInternals {
     lastEmittedByWorkspaceId: Map<string, unknown>;
   };
   buildWorkspaceDescriptorMap: () => Promise<Map<string, unknown>>;
-  syncWorkspaceGitObserver(cwd: string, details: { isGit: boolean; workspaceId: string }): void;
+  workspaceGitObserver: WorkspaceGitObserverService;
   listAgentPayloads: () => Promise<unknown[]>;
+}
+
+// The observer's single public registration entry is syncObservers(descriptors); these
+// integration tests drive it with a minimal git descriptor for one workspace, then push
+// snapshots through the captured WorkspaceGitService listener.
+function syncGitObserver(session: Session, cwd: string, workspaceId: string): void {
+  asInternals<SessionInternals>(session).workspaceGitObserver.syncObservers([
+    {
+      id: workspaceId,
+      workspaceDirectory: cwd,
+      projectKind: "git",
+    } as unknown as WorkspaceDescriptorPayload,
+  ]);
 }
 
 type CheckoutStatusUpdatePayload = Extract<
@@ -221,6 +235,7 @@ function createSessionForWorkspaceGitWatchTests(options?: {
         unsubscribe: () => {},
       }),
       scheduleRefreshForCwd: () => {},
+      onWorkspaceStateMayHaveChanged: () => {},
       getMetrics: () => ({
         checkoutDiffTargetCount: 0,
         checkoutDiffSubscriptionCount: 0,
@@ -323,7 +338,7 @@ describe("workspace git watch targets", () => {
 
     sessionAny.buildWorkspaceDescriptorMap = async () => new Map([[descriptor.id, descriptor]]);
 
-    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
+    syncGitObserver(session, REPO_CWD, "ws-10");
 
     expect(workspaceGitService.registerWorkspace).toHaveBeenCalledWith(
       { cwd: REPO_CWD },
@@ -382,7 +397,7 @@ describe("workspace git watch targets", () => {
       lastEmittedByWorkspaceId: new Map(),
     };
 
-    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
+    syncGitObserver(session, REPO_CWD, "ws-10");
     emitted.length = 0;
 
     subscriptions[0]?.listener(
@@ -465,7 +480,7 @@ describe("workspace git watch targets", () => {
       name: "old-branch",
     });
 
-    sessionAny.syncWorkspaceGitObserver("/tmp/repo", { isGit: true, workspaceId: "ws-10" });
+    syncGitObserver(session, "/tmp/repo", "ws-10");
 
     subscriptions[0]?.listener(
       createWorkspaceRuntimeSnapshot("/tmp/repo", {
@@ -494,6 +509,66 @@ describe("workspace git watch targets", () => {
     await session.cleanup();
   });
 
+  test("archiving a workspace clears its script runtime entries by opaque workspace id", async () => {
+    const runtimeStore = new WorkspaceScriptRuntimeStore();
+    runtimeStore.set({
+      workspaceId: "ws-10",
+      scriptName: "app",
+      type: "service",
+      lifecycle: "running",
+      terminalId: "term-app",
+      exitCode: null,
+    });
+
+    const { session, projects, workspaces } = createSessionForWorkspaceGitWatchTests({
+      scriptRuntimeStore: runtimeStore,
+    });
+    seedGitWorkspace({
+      projects,
+      workspaces,
+      projectId: "proj-1",
+      workspaceId: "ws-10",
+      cwd: "/tmp/repo",
+      name: "main",
+    });
+
+    await asInternals<{ archiveWorkspaceRecord: (workspaceId: string) => Promise<void> }>(
+      session,
+    ).archiveWorkspaceRecord("ws-10");
+
+    expect(runtimeStore.listForWorkspace("ws-10")).toEqual([]);
+
+    await session.cleanup();
+  });
+
+  test("archiving a workspace releases its git watch subscription for the directory", async () => {
+    const { session, projects, workspaces, subscriptions } =
+      createSessionForWorkspaceGitWatchTests();
+    const sessionAny = asInternals<
+      SessionInternals & { archiveWorkspaceRecord: (workspaceId: string) => Promise<void> }
+    >(session);
+    seedGitWorkspace({
+      projects,
+      workspaces,
+      projectId: "proj-1",
+      workspaceId: "ws-10",
+      cwd: REPO_CWD,
+      name: "main",
+    });
+
+    syncGitObserver(session, REPO_CWD, "ws-10");
+    expect(subscriptions).toHaveLength(1);
+
+    await sessionAny.archiveWorkspaceRecord("ws-10");
+
+    // Re-observing the directory establishes a fresh subscription only if archive
+    // tore down the prior one, which is keyed by cwd — not the opaque workspace id.
+    syncGitObserver(session, REPO_CWD, "ws-10");
+    expect(subscriptions).toHaveLength(2);
+
+    await session.cleanup();
+  });
+
   test("embeds PR status in checkout_status_update for GitHub-inclusive snapshot pushes", async () => {
     const { session, emitted, projects, workspaces, subscriptions } =
       createSessionForWorkspaceGitWatchTests();
@@ -514,7 +589,7 @@ describe("workspace git watch targets", () => {
       lastEmittedByWorkspaceId: new Map(),
     };
 
-    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
+    syncGitObserver(session, REPO_CWD, "ws-10");
     emitted.length = 0;
 
     subscriptions[0]?.listener(

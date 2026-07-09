@@ -4,6 +4,7 @@ import { StyleSheet } from "react-native-unistyles";
 import { MarkdownTextSpan } from "@/components/markdown-text";
 import * as Clipboard from "expo-clipboard";
 import { Check, Copy } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
 import type { HighlightToken } from "@getpaseo/highlight";
 import { isNative, isWeb } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -28,6 +29,8 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   rust: "rs",
   golang: "go",
   "c++": "cpp",
+  csharp: "cs",
+  "c#": "cs",
   objc: "m",
   "objective-c": "m",
   markdown: "md",
@@ -153,6 +156,7 @@ interface CopyButtonProps {
 const COPIED_RESET_MS = 1500;
 
 const CopyButton = React.memo(function CopyButton({ getCode, visible }: CopyButtonProps) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -189,7 +193,7 @@ const CopyButton = React.memo(function CopyButton({ getCode, visible }: CopyButt
       style={wrapperStyle}
       pointerEvents={visible ? "auto" : "none"}
       accessibilityRole="button"
-      accessibilityLabel={copied ? "Copied" : "Copy code"}
+      accessibilityLabel={copied ? t("message.actions.copied") : t("message.actions.copyCode")}
       hitSlop={8}
     >
       {({ hovered }) => {

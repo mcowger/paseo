@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
-import { Text, View } from "react-native";
-import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { MessageSquareCode, MousePointer2 } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
 import type {
   ComposerAttachment,
   UserComposerAttachment,
   WorkspaceComposerAttachment,
 } from "@/attachments/types";
-import { AttachmentPill } from "@/components/attachment-pill";
-import { useWorkspaceAttachmentsStore } from "@/attachments/workspace-attachments-store";
+import { getWorkspaceAttachmentPillContent } from "@/attachments/attachment-pill-content";
+import { AttachmentLabel, AttachmentPill } from "@/components/attachment-pill";
 import {
   isWorkspaceAttachment,
+  isPullRequestContextAttachment,
   userAttachmentsOnly,
   workspaceAttachmentToSubmitAttachment,
 } from "@/attachments/workspace-attachment-utils";
-import { ICON_SIZE, type Theme } from "@/styles/theme";
+import {
+  getAttachmentKey,
+  removeSentContextAttachments,
+  removeWorkspaceAttachmentsMatching,
+} from "./workspace-cleanup";
 import { useClearReviewDraft } from "@/review/store";
 
 interface WorkspaceAttachmentBindingInput {
@@ -47,30 +50,43 @@ interface ComposerWorkspaceAttachmentBinding {
   resetSuppression: () => void;
 }
 
-function getAttachmentKey(attachment: WorkspaceComposerAttachment): string {
+function getOpenAccessibilityLabel(
+  attachment: WorkspaceComposerAttachment,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
   if (attachment.kind === "browser_element") {
-    return JSON.stringify({
-      type: "browser_element",
-      url: attachment.attachment.url,
-      selector: attachment.attachment.selector,
-      tag: attachment.attachment.tag,
-      text: attachment.attachment.text,
-      html: attachment.attachment.outerHTML,
-    });
+    return t("composer.attachments.openBrowserElement");
   }
-  return JSON.stringify({
-    type: "review",
-    cwd: attachment.attachment.cwd,
-    mode: attachment.attachment.mode,
-    baseRef: attachment.attachment.baseRef ?? null,
-    reviewDraftKey: attachment.reviewDraftKey,
-    comments: attachment.attachment.comments.map((comment) => ({
-      filePath: comment.filePath,
-      side: comment.side,
-      lineNumber: comment.lineNumber,
-      body: comment.body,
-    })),
-  });
+  if (isPullRequestContextAttachment(attachment)) {
+    return "Open context attachment";
+  }
+  if (attachment.kind === "chat_history") {
+    return "Open chat history attachment";
+  }
+  return t("composer.attachments.openReview");
+}
+
+function getRemoveAccessibilityLabel(
+  attachment: WorkspaceComposerAttachment,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
+  if (attachment.kind === "browser_element") {
+    return t("composer.attachments.removeBrowserElement");
+  }
+  if (isPullRequestContextAttachment(attachment)) {
+    return "Remove context attachment";
+  }
+  if (attachment.kind === "chat_history") {
+    return "Remove chat history attachment";
+  }
+  return t("composer.attachments.removeReview");
+}
+
+function getPillTestID(attachment: WorkspaceComposerAttachment): string {
+  if (attachment.kind === "chat_history") {
+    return "composer-chat-history-attachment-pill";
+  }
+  return "composer-review-attachment-pill";
 }
 
 function renderPill(args: RenderWorkspaceAttachmentPillArgs): ReactElement {
@@ -89,9 +105,6 @@ function useWorkspaceAttachmentBinding({
   onOpenWorkspaceAttachment,
 }: WorkspaceAttachmentBindingInput): ComposerWorkspaceAttachmentBinding {
   const clearReviewDraft = useClearReviewDraft();
-  const setWorkspaceAttachments = useWorkspaceAttachmentsStore(
-    (state) => state.setWorkspaceAttachments,
-  );
   const [suppressedKeys, setSuppressedKeys] = useState<readonly string[]>([]);
   const workspaceAttachmentKeys = useMemo(
     () => workspaceAttachments.map(getAttachmentKey),
@@ -142,6 +155,7 @@ function useWorkspaceAttachmentBinding({
           clearReviewDraft({ key: attachment.reviewDraftKey });
         }
       }
+      removeSentContextAttachments(attachments);
     },
     [clearReviewDraft],
   );
@@ -150,17 +164,13 @@ function useWorkspaceAttachmentBinding({
     ({ selectedAttachments: current, index }: RemoveWorkspaceAttachmentInput) => {
       const selected = current[index];
       if (isWorkspaceAttachment(selected)) {
-        if (selected.kind === "browser_element") {
+        if (
+          selected.kind === "browser_element" ||
+          selected.kind === "chat_history" ||
+          isPullRequestContextAttachment(selected)
+        ) {
           const selectedKey = getAttachmentKey(selected);
-          const { attachmentsByScope } = useWorkspaceAttachmentsStore.getState();
-          for (const [scopeKey, attachments] of Object.entries(attachmentsByScope)) {
-            const nextAttachments = attachments.filter(
-              (attachment) => getAttachmentKey(attachment) !== selectedKey,
-            );
-            if (nextAttachments.length !== attachments.length) {
-              setWorkspaceAttachments({ scopeKey, attachments: nextAttachments });
-            }
-          }
+          removeWorkspaceAttachmentsMatching(selectedKey);
           return true;
         }
         suppressWorkspaceAttachment(selected);
@@ -168,7 +178,7 @@ function useWorkspaceAttachmentBinding({
       }
       return false;
     },
-    [setWorkspaceAttachments, suppressWorkspaceAttachment],
+    [suppressWorkspaceAttachment],
   );
 
   const openAttachment = useCallback(
@@ -231,15 +241,8 @@ function WorkspaceAttachmentPill({
   onOpen,
   onRemove,
 }: WorkspaceAttachmentPillProps) {
-  let label: string;
-  if (attachment.kind === "browser_element") {
-    label = `Element · ${attachment.attachment.tag}`;
-  } else {
-    label =
-      attachment.commentCount === 1
-        ? "Review · 1 comment"
-        : `Review · ${attachment.commentCount} comments`;
-  }
+  const { t } = useTranslation();
+  const content = getWorkspaceAttachmentPillContent(attachment, t);
   const handleOpen = useCallback(() => {
     onOpen(attachment);
   }, [onOpen, attachment]);
@@ -248,33 +251,14 @@ function WorkspaceAttachmentPill({
   }, [onRemove, index]);
   return (
     <AttachmentPill
-      testID="composer-review-attachment-pill"
+      testID={getPillTestID(attachment)}
       onOpen={handleOpen}
       onRemove={handleRemove}
-      openAccessibilityLabel={
-        attachment.kind === "browser_element"
-          ? "Open browser element attachment"
-          : "Open review attachment"
-      }
-      removeAccessibilityLabel={
-        attachment.kind === "browser_element"
-          ? "Remove browser element attachment"
-          : "Remove review attachment"
-      }
+      openAccessibilityLabel={getOpenAccessibilityLabel(attachment, t)}
+      removeAccessibilityLabel={getRemoveAccessibilityLabel(attachment, t)}
       disabled={disabled}
     >
-      <View style={styles.pillBody}>
-        <View style={styles.pillIcon}>
-          {attachment.kind === "browser_element" ? (
-            <ThemedMousePointer2 size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
-          ) : (
-            <ThemedMessageSquareCode size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
-          )}
-        </View>
-        <Text style={styles.pillText} numberOfLines={1}>
-          {label}
-        </Text>
-      </View>
+      <AttachmentLabel icon={content.icon} title={content.title} subtitle={content.subtitle} />
     </AttachmentPill>
   );
 }
@@ -286,31 +270,3 @@ export const composerWorkspaceAttachment = {
   userAttachmentsOnly,
   useBinding: useWorkspaceAttachmentBinding,
 };
-
-const styles = StyleSheet.create((theme: Theme) => ({
-  pillBody: {
-    minHeight: 48,
-    maxWidth: 260,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
-    backgroundColor: theme.colors.surface1,
-  },
-  pillIcon: {
-    width: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  pillText: {
-    minWidth: 0,
-    flexShrink: 1,
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-  },
-})) as unknown as Record<string, object>;
-
-const ThemedMousePointer2 = withUnistyles(MousePointer2);
-const ThemedMessageSquareCode = withUnistyles(MessageSquareCode);
-const iconForegroundMutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });

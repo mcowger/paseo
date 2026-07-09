@@ -77,6 +77,7 @@ describe("workspace navigation", () => {
     const agent = {
       id: "agent-1",
       cwd: "/repo/workspace-a",
+      workspaceId: "workspace-a",
       requiresAttention: true,
       attentionReason: "permission",
     } as unknown as Agent;
@@ -112,6 +113,18 @@ describe("workspace navigation", () => {
       serverId: "server-1",
       workspaceId: "/tmp/paseo-missing-workspace",
     });
+  });
+
+  it("ignores stale workspace route params while an app-wide route is active", () => {
+    const selection = parseActiveWorkspaceSelection({
+      pathname: "/settings/general",
+      params: {
+        serverId: "server-1",
+        workspaceId: "workspace-a",
+      },
+    });
+
+    expect(selection).toBeNull();
   });
 
   it("navigates to the last workspace once a route observation has been remembered", () => {

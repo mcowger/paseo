@@ -14,6 +14,7 @@ interface SupervisorLogFileOptions {
 type WorkerLifecycleMessage =
   | {
       type: "paseo:shutdown";
+      reason?: string;
     }
   | {
       type: "paseo:ready";
@@ -23,6 +24,10 @@ type WorkerLifecycleMessage =
       type: "paseo:restart";
       reason?: string;
     };
+
+interface SupervisorHeartbeatMessage {
+  type: "paseo:supervisor-heartbeat";
+}
 
 interface SupervisorOptions {
   name: string;
@@ -52,7 +57,11 @@ function parseLifecycleMessage(msg: unknown): WorkerLifecycleMessage | null {
   }
   const type = (msg as { type?: unknown }).type;
   if (type === "paseo:shutdown") {
-    return { type: "paseo:shutdown" };
+    const reason = (msg as { reason?: unknown }).reason;
+    return {
+      type: "paseo:shutdown",
+      ...(typeof reason === "string" && reason.trim().length > 0 ? { reason } : {}),
+    };
   }
   if (type === "paseo:ready") {
     const listen = (msg as { listen?: unknown }).listen;
@@ -183,6 +192,27 @@ export function runSupervisor(options: SupervisorOptions): void {
       });
     }
 
+    const currentChild = child;
+    const heartbeat = setInterval(() => {
+      const message: SupervisorHeartbeatMessage = { type: "paseo:supervisor-heartbeat" };
+      if (currentChild.connected) {
+        currentChild.send?.(message, (error) => {
+          if (error) {
+            writeLifecycleLog("Worker heartbeat IPC send failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        });
+      } else {
+        writeLifecycleLog("Worker heartbeat skipped because IPC channel is disconnected");
+      }
+    }, 1000);
+    heartbeat.unref();
+
+    child.on("disconnect", () => {
+      writeLifecycleLog("Worker IPC channel disconnected");
+    });
+
     child.stdout?.on("data", (chunk: Buffer) => {
       process.stdout.write(chunk);
       writeDurableChunk(chunk);
@@ -211,19 +241,19 @@ export function runSupervisor(options: SupervisorOptions): void {
       }
 
       if (lifecycleMessage.type === "paseo:shutdown") {
-        writeLifecycleLog("Worker requested shutdown");
-        requestShutdown("Shutdown requested by worker");
+        const reason = lifecycleMessage.reason ?? "worker_requested_shutdown";
+        writeLifecycleLog("Worker requested shutdown", { reason });
+        requestShutdown(reason);
         return;
       }
 
-      writeLifecycleLog(
-        "Worker requested restart",
-        lifecycleMessage.reason ? { reason: lifecycleMessage.reason } : {},
-      );
-      requestRestart("Restart requested by worker");
+      const reason = lifecycleMessage.reason ?? "worker_requested_restart";
+      writeLifecycleLog("Worker requested restart", { reason });
+      requestRestart(reason);
     });
 
     child.on("close", (code, signal) => {
+      clearInterval(heartbeat);
       const exitDescriptor = describeExit(code, signal);
       writeLifecycleLog("Worker exited", { code, signal, exit: exitDescriptor });
 
@@ -253,6 +283,19 @@ export function runSupervisor(options: SupervisorOptions): void {
     });
   };
 
+  const signalWorker = (signal: NodeJS.Signals, reason: string): void => {
+    if (!child) {
+      return;
+    }
+    writeLifecycleLog("Supervisor sending signal to worker", {
+      reason,
+      signal,
+      supervisorPid: process.pid,
+      workerPid: child.pid ?? null,
+    });
+    child.kill(signal);
+  };
+
   const requestRestart = (reason: string) => {
     if (!child || restarting || shuttingDown) {
       return;
@@ -260,7 +303,7 @@ export function runSupervisor(options: SupervisorOptions): void {
     restarting = true;
     writeLifecycleLog("Restart requested", { reason });
     log(`${reason}. Stopping worker for restart...`);
-    child.kill("SIGTERM");
+    signalWorker("SIGTERM", reason);
   };
 
   const requestShutdown = (reason: string) => {
@@ -275,11 +318,11 @@ export function runSupervisor(options: SupervisorOptions): void {
       exitSupervisor(0);
       return;
     }
-    child.kill("SIGTERM");
+    signalWorker("SIGTERM", reason);
   };
 
   const forwardSignal = (signal: NodeJS.Signals) => {
-    requestShutdown(`Received ${signal}`);
+    requestShutdown(`supervisor_received_${signal}`);
   };
 
   process.on("SIGINT", () => forwardSignal("SIGINT"));

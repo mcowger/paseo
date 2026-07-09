@@ -1,6 +1,7 @@
 import { isSyntaxThemeId, type SyntaxThemeId } from "@getpaseo/highlight";
 import type { QueryClient } from "@tanstack/react-query";
 import type { DesktopSettings } from "@/desktop/settings/desktop-settings";
+import { parseAppLanguage, type AppLanguage } from "@/i18n/locales";
 import { THEME_TO_UNISTYLES, type ThemeName } from "@/styles/theme";
 
 export const APP_SETTINGS_KEY = "@paseo:app-settings";
@@ -10,9 +11,11 @@ const LEGACY_SETTINGS_KEY = "@paseo:settings";
 export type SendBehavior = "interrupt" | "queue";
 export type ReleaseChannel = "stable" | "beta";
 export type ServiceUrlBehavior = "ask" | "in-app" | "external";
+export type WorkspaceTitleSource = "title" | "branch";
 
 const VALID_THEMES = new Set<string>([...Object.keys(THEME_TO_UNISTYLES), "auto"]);
 const VALID_SERVICE_URL_BEHAVIORS = new Set<ServiceUrlBehavior>(["ask", "in-app", "external"]);
+const VALID_WORKSPACE_TITLE_SOURCES = new Set<WorkspaceTitleSource>(["title", "branch"]);
 export const DEFAULT_TERMINAL_SCROLLBACK_LINES = 10_000;
 export const MIN_TERMINAL_SCROLLBACK_LINES = 0;
 export const MAX_TERMINAL_SCROLLBACK_LINES = 1_000_000;
@@ -26,6 +29,7 @@ export const MAX_FONT_FAMILY_LENGTH = 200;
 
 export interface AppSettings {
   theme: ThemeName | "auto";
+  language: AppLanguage;
   sendBehavior: SendBehavior;
   serviceUrlBehavior: ServiceUrlBehavior;
   terminalScrollbackLines: number;
@@ -34,6 +38,8 @@ export interface AppSettings {
   uiFontSize: number; // clamped px, default 16
   codeFontSize: number; // clamped px, default 12
   syntaxTheme: SyntaxThemeId; // default "one"
+  workspaceTitleSource: WorkspaceTitleSource;
+  autoExpandReasoning: boolean;
 }
 
 export interface Settings extends AppSettings {
@@ -43,6 +49,7 @@ export interface Settings extends AppSettings {
 
 export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   theme: "auto",
+  language: "system",
   sendBehavior: "interrupt",
   serviceUrlBehavior: "ask",
   terminalScrollbackLines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
@@ -51,6 +58,8 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   uiFontSize: DEFAULT_UI_FONT_SIZE,
   codeFontSize: DEFAULT_CODE_FONT_SIZE,
   syntaxTheme: "one",
+  workspaceTitleSource: "title",
+  autoExpandReasoning: false,
 };
 
 export const DEFAULT_APP_SETTINGS: Settings = {
@@ -149,6 +158,10 @@ function pickAppSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
   if (typeof stored.theme === "string" && VALID_THEMES.has(stored.theme)) {
     result.theme = stored.theme;
   }
+  const language = parseAppLanguage(stored.language);
+  if (language !== null) {
+    result.language = language;
+  }
   if (stored.sendBehavior === "interrupt" || stored.sendBehavior === "queue") {
     result.sendBehavior = stored.sendBehavior;
   }
@@ -186,6 +199,15 @@ function pickAppSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
   }
   if (typeof stored.syntaxTheme === "string" && isSyntaxThemeId(stored.syntaxTheme)) {
     result.syntaxTheme = stored.syntaxTheme;
+  }
+  if (
+    typeof stored.workspaceTitleSource === "string" &&
+    VALID_WORKSPACE_TITLE_SOURCES.has(stored.workspaceTitleSource)
+  ) {
+    result.workspaceTitleSource = stored.workspaceTitleSource;
+  }
+  if (typeof stored.autoExpandReasoning === "boolean") {
+    result.autoExpandReasoning = stored.autoExpandReasoning;
   }
   return result;
 }

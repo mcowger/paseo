@@ -14,6 +14,12 @@ const customWebPlatform = (process.env.PASEO_WEB_PLATFORM ?? "")
 
 const config = getDefaultConfig(projectRoot);
 const defaultResolveRequest = config.resolver.resolveRequest ?? resolve;
+
+// Keep app exports deterministic across dev machines and CI. Metro's Watchman
+// crawler behavior depends on the host Watchman build/capabilities, while the
+// node crawler is the path used when Watchman is absent.
+config.resolver.useWatchman = false;
+
 const escapedAppSrcRoot = appSrcRoot
   .split(path.sep)
   .map((segment) => segment.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&"))
@@ -77,5 +83,32 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
 
   return resolveWithCustomWebOverlay(context, moduleName, platform);
 };
+
+if (process.env.PASEO_SERVE_SIM_PREVIEW === "1") {
+  const { simMiddleware } = require("serve-sim/middleware");
+  const originalEnhanceMiddleware = config.server?.enhanceMiddleware;
+  config.server = config.server ?? {};
+  config.server.enhanceMiddleware = (metroMiddleware, server) => {
+    const middleware = originalEnhanceMiddleware
+      ? originalEnhanceMiddleware(metroMiddleware, server)
+      : metroMiddleware;
+    const serveSimulator = simMiddleware({
+      basePath: "/.sim",
+      device: process.env.PASEO_SERVE_SIM_DEVICE_UDID,
+    });
+    return (req, res, next) => {
+      serveSimulator(req, res, (error) => {
+        if (error) {
+          if (next) {
+            next(error);
+            return;
+          }
+          throw error;
+        }
+        middleware(req, res, next);
+      });
+    };
+  };
+}
 
 module.exports = config;

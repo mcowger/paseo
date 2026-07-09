@@ -1,5 +1,6 @@
 import { generateMessageId } from "@/types/stream";
 import { isAbsolutePath } from "@/utils/path";
+import { isRasterImageMimeType } from "./file-types";
 
 export function generateAttachmentId(): string {
   return `att_${generateMessageId()}`;
@@ -52,7 +53,7 @@ export function parseImageDataUrl(
 
   try {
     const parsed = parseDataUrl(uri);
-    if (!parsed.mimeType.toLowerCase().startsWith("image/")) {
+    if (!isRasterImageMimeType(parsed.mimeType)) {
       return null;
     }
     const fingerprint = `${parsed.mimeType}\0${parsed.base64.length}\0${parsed.base64.slice(0, 64)}\0${parsed.base64.slice(-64)}`;
@@ -138,11 +139,41 @@ export function pathToFileUri(path: string): string {
   return `file:///${path.replace(/\\/g, "/")}`;
 }
 
+function decodeFilePathSource(source: string): string {
+  try {
+    return decodeURIComponent(source);
+  } catch {
+    return source;
+  }
+}
+
+function normalizeWindowsDrivePath(path: string): string {
+  if (!/^[A-Za-z]:[\\/]/.test(path)) {
+    return path;
+  }
+  return path.replace(/\\/g, "/");
+}
+
+function isMarkdownEncodedWindowsDrivePath(source: string): boolean {
+  return /^[A-Za-z]:(?:%5[Cc]|%2[Ff])/.test(source);
+}
+
 export function fileUriToPath(uri: string): string {
   if (!uri.startsWith("file://")) {
     return uri;
   }
-  return decodeURIComponent(uri.replace(/^file:\/\//, ""));
+  const decodedPath = decodeFilePathSource(uri.replace(/^file:\/\//, ""));
+  return normalizeWindowsDrivePath(decodedPath.replace(/^\/([A-Za-z]:[\\/])/, "$1"));
+}
+
+export function localFileSourceToPath(source: string): string {
+  let path = source;
+  if (source.startsWith("file://")) {
+    path = fileUriToPath(source);
+  } else if (isMarkdownEncodedWindowsDrivePath(source)) {
+    path = decodeFilePathSource(source);
+  }
+  return normalizeWindowsDrivePath(path);
 }
 
 export function getFileExtensionFromName(fileName: string | null | undefined): string {

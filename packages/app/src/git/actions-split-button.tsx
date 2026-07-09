@@ -8,6 +8,7 @@ import {
 } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { ChevronDown, Info, MoreVertical } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,7 +57,11 @@ function GitActionMenuItem({
     <View>
       {needsSeparator && showSeparator ? <DropdownMenuSeparator /> : null}
       <DropdownMenuItem
-        testID={`changes-menu-${action.id}`}
+        testID={
+          action.id === "archive-worktree"
+            ? "workspace-archive-action"
+            : `changes-menu-${action.id}`
+        }
         leading={action.icon}
         trailing={trailing}
         disabled={action.disabled}
@@ -75,6 +80,7 @@ function GitActionMenuItem({
 
 export function GitActionsSplitButton({ gitActions, hideLabels }: GitActionsSplitButtonProps) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const toast = useToast();
   const archiveShortcutKeys = useShortcutKeys("archive-worktree");
 
@@ -162,7 +168,7 @@ export function GitActionsSplitButton({ gitActions, hideLabels }: GitActionsSpli
                 testID="changes-primary-cta-caret"
                 style={caretTriggerStyle}
                 accessibilityRole="button"
-                accessibilityLabel="More options"
+                accessibilityLabel={t("workspace.git.actions.moreOptions")}
               >
                 <ChevronDown size={16} color={theme.colors.foregroundMuted} />
               </DropdownMenuTrigger>
@@ -176,7 +182,10 @@ export function GitActionsSplitButton({ gitActions, hideLabels }: GitActionsSpli
                     needsSeparator={action.startsGroup}
                     showSeparator={index > 0}
                     closeOnSelect={
-                      action.status === "idle" && action.id === "pr" && action.label === "View PR"
+                      action.status === "idle" &&
+                      action.id === "pr" &&
+                      action.label === action.pendingLabel &&
+                      action.label === action.successLabel
                     }
                   />
                 ))}
@@ -192,7 +201,7 @@ export function GitActionsSplitButton({ gitActions, hideLabels }: GitActionsSpli
             hitSlop={8}
             style={overflowMenuButtonStyle}
             accessibilityRole="button"
-            accessibilityLabel="More actions"
+            accessibilityLabel={t("workspace.git.actions.moreActions")}
           >
             <MoreVertical size={16} color={theme.colors.foregroundMuted} />
           </DropdownMenuTrigger>

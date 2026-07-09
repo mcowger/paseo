@@ -96,6 +96,26 @@ describe("prompt attachments", () => {
     ).toBe("<browser-element>button.primary</browser-element>");
   });
 
+  it("renders uploaded file attachments as local file references", () => {
+    expect(
+      renderPromptAttachmentAsText({
+        type: "uploaded_file",
+        id: "upload_req-upload",
+        fileName: "notes.txt",
+        mimeType: "text/plain",
+        size: 11,
+        path: "/tmp/paseo/uploads/upload_req-upload/notes.txt",
+      }),
+    ).toBe(
+      [
+        "Uploaded file: notes.txt",
+        "Path: /tmp/paseo/uploads/upload_req-upload/notes.txt",
+        "MIME: text/plain",
+        "Size: 11 bytes",
+      ].join("\n"),
+    );
+  });
+
   it("returns undefined when firstAgentContext is empty", () => {
     expect(buildAgentBranchNameSeed(undefined)).toBeUndefined();
     expect(buildAgentBranchNameSeed({})).toBeUndefined();
@@ -103,7 +123,7 @@ describe("prompt attachments", () => {
     expect(buildAgentBranchNameSeed({ attachments: [] })).toBeUndefined();
   });
 
-  it("joins prompt and rendered attachments into a single seed", () => {
+  it("wraps prompt and rendered attachments as tagged naming input", () => {
     expect(
       buildAgentBranchNameSeed({
         prompt: "Investigate flaky test",
@@ -120,7 +140,7 @@ describe("prompt attachments", () => {
         ],
       }),
     ).toBe(
-      "Investigate flaky test\n\nGitHub PR #123: Fix worktree naming\nhttps://github.com/getpaseo/paseo/pull/123\nBase: main\nHead: fix/worktree-naming",
+      "<user-prompt>\nInvestigate flaky test\n</user-prompt>\n\n<attachments>\nGitHub PR #123: Fix worktree naming\nhttps://github.com/getpaseo/paseo/pull/123\nBase: main\nHead: fix/worktree-naming\n</attachments>",
     );
   });
 });

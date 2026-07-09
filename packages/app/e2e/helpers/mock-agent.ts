@@ -1,10 +1,11 @@
 import type { Page } from "@playwright/test";
-import { buildHostWorkspaceRoute } from "../../src/utils/host-routes";
 import { seedWorkspace, type SeedDaemonClient } from "./seed-client";
 import { getServerId } from "./server-id";
+import { buildHostAgentDetailRoute } from "../../src/utils/host-routes";
 
 export interface MockAgentWorkspace {
   agentId: string;
+  workspaceId: string;
   cwd: string;
   client: SeedDaemonClient;
   cleanup(): Promise<void>;
@@ -32,6 +33,7 @@ export async function seedMockAgentWorkspace(
     const agent = await workspace.client.createAgent({
       provider: "mock",
       cwd: workspace.repoPath,
+      workspaceId: workspace.workspaceId,
       title: options.title,
       modeId: options.modeId ?? "load-test",
       model: options.model ?? "ten-second-stream",
@@ -40,6 +42,7 @@ export async function seedMockAgentWorkspace(
     });
     return {
       agentId: agent.id,
+      workspaceId: workspace.workspaceId,
       cwd: workspace.repoPath,
       client: workspace.client,
       cleanup: workspace.cleanup,
@@ -50,18 +53,16 @@ export async function seedMockAgentWorkspace(
   }
 }
 
-export function buildAgentRoute(cwd: string, agentId: string): string {
-  return `${buildHostWorkspaceRoute(getServerId(), cwd)}?open=${encodeURIComponent(
-    `agent:${agentId}`,
-  )}`;
+export function buildAgentRoute(workspaceId: string, agentId: string): string {
+  return buildHostAgentDetailRoute(getServerId(), agentId, workspaceId);
 }
 
 /** Boots the app directly at the agent's workspace route and waits for the open intent to settle. */
 export async function openAgentRoute(
   page: Page,
-  input: { cwd: string; agentId: string },
+  input: { workspaceId: string; agentId: string },
 ): Promise<void> {
-  await page.goto(buildAgentRoute(input.cwd, input.agentId));
+  await page.goto(buildAgentRoute(input.workspaceId, input.agentId));
   await page.waitForURL(
     (url) => url.pathname.includes("/workspace/") && !url.searchParams.has("open"),
     { timeout: 60_000 },

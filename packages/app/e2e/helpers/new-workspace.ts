@@ -3,35 +3,77 @@ import type { DaemonClient as InternalDaemonClient } from "@getpaseo/client/inte
 import { decodeWorkspaceIdFromPathSegment } from "@/utils/host-routes";
 import { connectDaemonClient } from "./daemon-client-loader";
 import { daemonWsRoutePattern } from "./daemon-port";
-import { expectWorkspaceHeader, workspaceLabelFromPath } from "./workspace-ui";
+import { expectWorkspaceHeader } from "./workspace-ui";
 
 type NewWorkspaceDaemonClient = Pick<
   InternalDaemonClient,
   | "archivePaseoWorktree"
   | "archiveWorkspace"
+  | "checkoutRefresh"
   | "close"
   | "connect"
   | "createPaseoWorktree"
-  | "openProject"
+  | "createWorkspace"
+  | "fetchWorkspaces"
+  | "getPaseoWorktreeList"
+  | "getDaemonConfig"
+  | "patchDaemonConfig"
+  | "removeProject"
 >;
 
-type OpenProjectPayload = Awaited<ReturnType<NewWorkspaceDaemonClient["openProject"]>>;
+type CreateWorkspacePayload = Awaited<ReturnType<NewWorkspaceDaemonClient["createWorkspace"]>>;
+type WorkspacePayload = Pick<CreateWorkspacePayload, "error" | "workspace">;
+type WorkspaceDescriptor = NonNullable<CreateWorkspacePayload["workspace"]>;
 
 export interface OpenedProject {
   workspaceId: string;
   projectKey: string;
   projectDisplayName: string;
   workspaceName: string;
+  workspaceDirectory: string;
 }
 
-function requireWorkspace(payload: OpenProjectPayload) {
+function requireWorkspace(payload: WorkspacePayload) {
   if (payload.error) {
     throw new Error(payload.error);
   }
   if (!payload.workspace) {
-    throw new Error("openProject returned no workspace.");
+    throw new Error("workspace.create returned no workspace.");
   }
   return payload.workspace;
+}
+
+function openedProjectFromWorkspace(workspace: WorkspaceDescriptor): OpenedProject {
+  return {
+    workspaceId: workspace.id,
+    projectKey: workspace.projectId,
+    projectDisplayName: workspace.projectDisplayName,
+    workspaceName: workspace.name,
+    workspaceDirectory: workspace.workspaceDirectory,
+  };
+}
+
+async function fetchWorkspaceById(
+  client: NewWorkspaceDaemonClient,
+  workspaceId: string,
+): Promise<WorkspaceDescriptor | null> {
+  const payload = await client.fetchWorkspaces();
+  return payload.entries.find((entry) => entry.id === workspaceId) ?? null;
+}
+
+async function waitForWorkspaceDescriptor(
+  client: NewWorkspaceDaemonClient,
+  workspaceId: string,
+): Promise<WorkspaceDescriptor> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const workspace = await fetchWorkspaceById(client, workspaceId);
+    if (workspace) {
+      return workspace;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Workspace descriptor not found: ${workspaceId}`);
 }
 
 function parseWorkspaceIdFromPageUrl(page: Page, serverId: string): string | null {
@@ -55,25 +97,28 @@ export async function openProjectViaDaemon(
   client: NewWorkspaceDaemonClient,
   repoPath: string,
 ): Promise<OpenedProject> {
-  const workspace = requireWorkspace(await client.openProject(repoPath));
-  return {
-    workspaceId: workspace.id,
-    projectKey: workspace.projectId,
-    projectDisplayName: workspace.projectDisplayName,
-    workspaceName: workspace.name,
-  };
+  const workspace = requireWorkspace(
+    await client.createWorkspace({
+      source: { kind: "directory", path: repoPath },
+    }),
+  );
+  return openedProjectFromWorkspace(workspace);
 }
 
 export async function archiveWorkspaceFromDaemon(
   client: NewWorkspaceDaemonClient,
-  workspaceId: string,
+  workspaceDirectory: string,
+  options?: { scope?: "workspace" | "worktree" },
 ): Promise<void> {
-  const payload = await client.archivePaseoWorktree({ worktreePath: workspaceId });
+  const payload = await client.archivePaseoWorktree({
+    worktreePath: workspaceDirectory,
+    ...(options?.scope !== undefined ? { scope: options.scope } : {}),
+  });
   if (payload.error) {
     throw new Error(payload.error.message);
   }
   if (!payload.success) {
-    throw new Error(`Failed to archive workspace: ${workspaceId}`);
+    throw new Error(`Failed to archive workspace: ${workspaceDirectory}`);
   }
 }
 
@@ -99,12 +144,7 @@ export async function createWorktreeViaDaemon(
     worktreeSlug: input.slug,
   });
   const workspace = requireWorkspace(payload);
-  return {
-    workspaceId: workspace.id,
-    projectKey: workspace.projectId,
-    projectDisplayName: workspace.projectDisplayName,
-    workspaceName: workspace.name,
-  };
+  return openedProjectFromWorkspace(workspace);
 }
 
 export async function openNewWorkspaceComposer(
@@ -119,15 +159,15 @@ export async function openNewWorkspaceComposer(
   await expect(button).toBeVisible({ timeout: 30_000 });
   await button.click();
 
-  await expect(page).toHaveURL(/\/h\/[^/]+\/new(?:\?.*)?$/, {
+  await expect(page).toHaveURL(/\/new(?:\?.*)?$/, {
     timeout: 30_000,
   });
 }
 
 export async function openGlobalNewWorkspaceComposer(page: Page): Promise<void> {
-  await page.getByTestId("sidebar-new-workspace").click();
+  await page.getByTestId("sidebar-global-new-workspace").click();
 
-  await expect(page).toHaveURL(/\/h\/[^/]+\/new(?:\?.*)?$/, {
+  await expect(page).toHaveURL(/\/new(?:\?.*)?$/, {
     timeout: 30_000,
   });
 }
@@ -161,6 +201,61 @@ export async function clickNewWorkspaceButton(
 ): Promise<void> {
   await openNewWorkspaceComposer(page, input);
   await submitNewWorkspacePrompt(page, input.prompt);
+}
+
+export async function selectNewWorkspaceProject(
+  page: Page,
+  input: { projectKey: string; projectDisplayName: string },
+): Promise<void> {
+  const trigger = page.getByTestId("new-workspace-project-picker-trigger");
+  await expect(trigger).toBeVisible({ timeout: 30_000 });
+  await trigger.click();
+
+  const option = page.getByTestId(`new-workspace-project-picker-option-${input.projectKey}`);
+  await expect(option).toBeVisible({ timeout: 30_000 });
+  await option.click();
+
+  await expectNewWorkspaceProjectSelected(page, input.projectDisplayName);
+}
+
+// The isolation trigger renders the active isolation's label ("Local" / "New
+// worktree"), so asserting its text proves what the screen currently remembers.
+const ISOLATION_TRIGGER_LABEL: Record<"local" | "worktree", string> = {
+  local: "Local",
+  worktree: "New worktree",
+};
+
+export async function expectWorkspaceIsolationSelected(
+  page: Page,
+  isolation: "local" | "worktree",
+): Promise<void> {
+  const trigger = page.getByRole("button", { name: "Workspace isolation" });
+  await expect(trigger).toBeVisible({ timeout: 30_000 });
+  await expect(trigger).toContainText(ISOLATION_TRIGGER_LABEL[isolation]);
+}
+
+export async function selectWorkspaceIsolation(
+  page: Page,
+  isolation: "local" | "worktree",
+): Promise<void> {
+  const trigger = page.getByTestId("workspace-create-isolation-trigger");
+  await expect(trigger).toBeVisible({ timeout: 30_000 });
+  await trigger.click();
+
+  // "New worktree" is only listed once the checkout status query confirms the
+  // selected project is a git repo, so wait for the option to appear before
+  // clicking it.
+  const option = page.getByTestId(`workspace-create-isolation-${isolation}`);
+  await expect(option).toBeVisible({ timeout: 30_000 });
+  await option.click();
+}
+
+export async function submitNewWorkspaceEmpty(page: Page): Promise<void> {
+  const createButton = page
+    .getByTestId("message-input-root")
+    .getByRole("button", { name: "Create" });
+  await expect(createButton).toBeVisible({ timeout: 30_000 });
+  await createButton.click();
 }
 
 export async function openStartingRefPicker(page: Page): Promise<void> {
@@ -240,43 +335,50 @@ export async function assertNewWorkspaceSidebarAndHeader(
   page: Page,
   input: {
     serverId: string;
+    client: NewWorkspaceDaemonClient;
     previousWorkspaceId: string;
     projectDisplayName: string;
     assertSidebarRow?: boolean;
     assertHeader?: boolean;
   },
-): Promise<{ workspaceId: string }> {
-  // Wait for URL to redirect to the newly created workspace.
-  // Uses URL as source of truth to avoid picking up sidebar rows from concurrent tests.
-  let workspaceId: string | null = null;
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    workspaceId = parseWorkspaceIdFromPageUrl(page, input.serverId);
-    if (workspaceId && workspaceId !== input.previousWorkspaceId) {
-      break;
-    }
-    await page.waitForTimeout(250);
-  }
+): Promise<{ workspaceId: string; workspaceName: string; workspaceDirectory: string }> {
+  // URL is the source of truth so concurrent sidebar rows cannot satisfy this.
+  await expect
+    .poll(
+      () => {
+        const workspaceId = parseWorkspaceIdFromPageUrl(page, input.serverId);
+        return workspaceId && workspaceId !== input.previousWorkspaceId ? workspaceId : null;
+      },
+      { timeout: 60_000 },
+    )
+    .not.toBeNull();
 
+  const workspaceId = parseWorkspaceIdFromPageUrl(page, input.serverId);
   if (!workspaceId || workspaceId === input.previousWorkspaceId) {
     throw new Error(`Expected URL to redirect to a new workspace.\nCurrent URL: ${page.url()}`);
   }
 
+  const workspace = await waitForWorkspaceDescriptor(input.client, workspaceId);
+
   if (input.assertSidebarRow !== false) {
     const createdWorkspaceRow = page.getByTestId(
-      `sidebar-workspace-row-${input.serverId}:${workspaceId}`,
+      `sidebar-workspace-row-${input.serverId}:${workspace.id}`,
     );
     await expect(createdWorkspaceRow.first()).toBeVisible({ timeout: 30_000 });
   }
 
   if (input.assertHeader !== false) {
     await expectWorkspaceHeader(page, {
-      title: workspaceLabelFromPath(workspaceId),
+      title: workspace.name,
       subtitle: input.projectDisplayName,
     });
   }
 
-  return { workspaceId };
+  return {
+    workspaceId: workspace.id,
+    workspaceName: workspace.name,
+    workspaceDirectory: workspace.workspaceDirectory,
+  };
 }
 
 type WebSocketMessage = string | Buffer;

@@ -1,8 +1,10 @@
 import type {
   DesktopAppUpdateCheckResult,
+  DesktopAppUpdateCheckIntent,
   DesktopAppUpdateInstallResult,
   DesktopReleaseChannel,
 } from "@/desktop/updates/desktop-updates";
+import { i18n } from "@/i18n/i18next";
 
 export type DesktopAppUpdateStatus =
   | "idle"
@@ -29,6 +31,7 @@ export interface DesktopAppUpdaterSnapshot {
 export interface DesktopAppUpdaterPort {
   checkDesktopAppUpdate(input: {
     releaseChannel: DesktopReleaseChannel;
+    intent: DesktopAppUpdateCheckIntent;
   }): Promise<DesktopAppUpdateCheckResult>;
   installDesktopAppUpdate(input: {
     releaseChannel: DesktopReleaseChannel;
@@ -52,6 +55,7 @@ export interface DesktopAppUpdater {
   subscribe(listener: () => void): () => void;
   checkForUpdates(options?: {
     releaseChannel: DesktopReleaseChannel;
+    intent?: DesktopAppUpdateCheckIntent;
     silent?: boolean;
   }): Promise<DesktopAppUpdateCheckResult | null>;
   installUpdate(options: {
@@ -102,42 +106,87 @@ export function formatStatusText(input: {
   status: DesktopAppUpdateStatus;
   availableUpdate: DesktopAppUpdateCheckResult | null;
   installMessage: string | null;
+  lastCheckedAt: number | null;
   formatVersion: (version: string | null | undefined) => string;
+  formatLastCheckedAt: (timestamp: number) => string;
 }): string {
-  const { status, availableUpdate, installMessage, formatVersion } = input;
+  const {
+    status,
+    availableUpdate,
+    installMessage,
+    lastCheckedAt,
+    formatVersion,
+    formatLastCheckedAt,
+  } = input;
 
   if (status === "checking") {
-    return "Checking for app updates...";
+    return i18n.t("desktop.updates.status.checking");
   }
 
   if (status === "installing") {
-    return "Installing app update...";
+    return i18n.t("desktop.updates.status.installing");
   }
 
   if (status === "up-to-date") {
-    return "App is up to date.";
+    if (lastCheckedAt != null) {
+      return i18n.t("desktop.updates.status.upToDateWithLastChecked", {
+        time: formatLastCheckedAt(lastCheckedAt),
+      });
+    }
+    return i18n.t("desktop.updates.status.upToDate");
   }
 
   if (status === "pending") {
-    return "We'll let you know when the update is ready.";
+    if (availableUpdate?.latestVersion) {
+      return i18n.t(
+        lastCheckedAt != null
+          ? "desktop.updates.status.pendingWithVersionAndLastChecked"
+          : "desktop.updates.status.pendingWithVersion",
+        {
+          version: formatVersion(availableUpdate.latestVersion),
+          time: lastCheckedAt != null ? formatLastCheckedAt(lastCheckedAt) : undefined,
+        },
+      );
+    }
+
+    if (lastCheckedAt != null) {
+      return i18n.t("desktop.updates.status.pendingWithLastChecked", {
+        time: formatLastCheckedAt(lastCheckedAt),
+      });
+    }
+    return i18n.t("desktop.updates.status.pending");
   }
 
   if (status === "available") {
     if (availableUpdate?.latestVersion) {
-      return `Update ready: ${formatVersion(availableUpdate.latestVersion)}`;
+      return i18n.t(
+        lastCheckedAt != null
+          ? "desktop.updates.status.availableWithVersionAndLastChecked"
+          : "desktop.updates.status.availableWithVersion",
+        {
+          version: formatVersion(availableUpdate.latestVersion),
+          time: lastCheckedAt != null ? formatLastCheckedAt(lastCheckedAt) : undefined,
+        },
+      );
     }
-    return "An app update is ready to install.";
+
+    if (lastCheckedAt != null) {
+      return i18n.t("desktop.updates.status.availableWithLastChecked", {
+        time: formatLastCheckedAt(lastCheckedAt),
+      });
+    }
+    return i18n.t("desktop.updates.status.available");
   }
 
   if (status === "installed") {
-    return installMessage ?? "App update installed. Restart required.";
+    return installMessage ?? i18n.t("desktop.updates.status.installed");
   }
 
   if (status === "error") {
-    return "Failed to update app.";
+    return i18n.t("desktop.updates.status.failed");
   }
 
-  return "Update status has not been checked yet.";
+  return i18n.t("desktop.updates.status.idle");
 }
 
 export function createDesktopAppUpdater(deps: DesktopAppUpdaterDeps): DesktopAppUpdater {
@@ -155,28 +204,50 @@ export function createDesktopAppUpdater(deps: DesktopAppUpdaterDeps): DesktopApp
 
   async function checkForUpdates(options?: {
     releaseChannel: DesktopReleaseChannel;
+    intent?: DesktopAppUpdateCheckIntent;
     silent?: boolean;
   }): Promise<DesktopAppUpdateCheckResult | null> {
     if (!options) {
       return null;
     }
-    const { releaseChannel, silent = false } = options;
+    const { releaseChannel, intent = "manual", silent = false } = options;
+    if (silent && state.status === "checking") {
+      return null;
+    }
+
     const requestVersion = state.requestVersion + 1;
 
     commit({
       ...state,
       requestVersion,
       status: silent ? state.status : "checking",
-      errorMessage: null,
+      errorMessage: silent ? state.errorMessage : null,
     });
 
     try {
-      const result = await deps.port.checkDesktopAppUpdate({ releaseChannel });
+      const result = await deps.port.checkDesktopAppUpdate({ releaseChannel, intent });
       if (requestVersion !== state.requestVersion) {
         return result;
       }
 
-      const nextLastCheckedAt = deps.now();
+      const nextLastCheckedAt = intent === "manual" ? deps.now() : state.lastCheckedAt;
+      if (result.errorMessage) {
+        if (silent && !result.hasUpdate) {
+          console.warn("[DesktopUpdater] Silent update check failed", result.errorMessage);
+          return result;
+        }
+
+        commit({
+          ...state,
+          status: "error",
+          availableUpdate: null,
+          errorMessage: result.errorMessage,
+          installMessage: null,
+          lastCheckedAt: nextLastCheckedAt,
+        });
+        return result;
+      }
+
       let nextStatus: DesktopAppUpdateStatus;
       let nextAvailable: DesktopAppUpdateCheckResult | null;
 
@@ -185,7 +256,7 @@ export function createDesktopAppUpdater(deps: DesktopAppUpdaterDeps): DesktopApp
         nextAvailable = result;
       } else if (result.hasUpdate) {
         nextStatus = "pending";
-        nextAvailable = null;
+        nextAvailable = result;
       } else {
         nextStatus = "up-to-date";
         nextAvailable = null;
@@ -195,6 +266,7 @@ export function createDesktopAppUpdater(deps: DesktopAppUpdaterDeps): DesktopApp
         ...state,
         status: nextStatus,
         availableUpdate: nextAvailable,
+        errorMessage: null,
         installMessage: null,
         lastCheckedAt: nextLastCheckedAt,
       });
@@ -208,12 +280,12 @@ export function createDesktopAppUpdater(deps: DesktopAppUpdaterDeps): DesktopApp
       const message = getErrorMessage(error);
       if (silent) {
         console.warn("[DesktopUpdater] Silent update check failed", message);
-        commit({ ...state });
       } else {
         commit({
           ...state,
           status: "error",
           errorMessage: message,
+          lastCheckedAt: intent === "manual" ? deps.now() : state.lastCheckedAt,
         });
       }
       return null;
@@ -248,7 +320,7 @@ export function createDesktopAppUpdater(deps: DesktopAppUpdaterDeps): DesktopApp
       const message = getErrorMessage(error);
       deps.reportInstallError?.({
         error,
-        message: "Unable to install the desktop app update.",
+        message: i18n.t("desktop.updates.installError"),
         logLabel: "[DesktopUpdater] Failed to install app update",
       });
       commit({

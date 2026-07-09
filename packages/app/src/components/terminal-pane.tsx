@@ -10,6 +10,7 @@ import Animated, { runOnJS, useAnimatedReaction } from "react-native-reanimated"
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { encodeTerminalKeyInput } from "@getpaseo/protocol/terminal-key-input";
 import type { TerminalInputModeState } from "@getpaseo/protocol/terminal-input-mode";
+import { useTranslation } from "react-i18next";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
 import { useAppVisible } from "@/hooks/use-app-visible";
@@ -169,6 +170,7 @@ export function TerminalPane({
   onOpenFileExplorer,
   onOpenWorkspaceFile,
 }: TerminalPaneProps) {
+  const { t } = useTranslation();
   const isAppVisible = useAppVisible();
   const { theme } = useUnistyles();
   const { settings } = useAppSettings();
@@ -191,6 +193,7 @@ export function TerminalPane({
   const supportsTerminalRestoreModes = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.["terminal-restore-modes"] === true,
   );
+  const setFocusedTerminalId = useSessionStore((state) => state.setFocusedTerminalId);
 
   const scopeKey = useMemo(() => terminalScopeKey({ serverId, cwd }), [serverId, cwd]);
   const terminalStreamKey = useMemo(() => `${scopeKey}:${terminalId}`, [scopeKey, terminalId]);
@@ -295,9 +298,19 @@ export function TerminalPane({
   }, [isPaneFocused, isWorkspaceFocused, requestTerminalReflow, scopeKey, terminalId]);
 
   const handleTerminalFocus = useCallback(() => {
+    if (isWorkspaceFocused && isPaneFocused) {
+      setFocusedTerminalId(serverId, terminalId);
+    }
     lastSentTerminalSizeRef.current = null;
     requestTerminalReflow();
-  }, [requestTerminalReflow]);
+  }, [
+    isPaneFocused,
+    isWorkspaceFocused,
+    requestTerminalReflow,
+    serverId,
+    setFocusedTerminalId,
+    terminalId,
+  ]);
 
   const clearKeyboardRefitTimeouts = useCallback(() => {
     if (keyboardRefitTimeoutsRef.current.length === 0) {
@@ -324,14 +337,14 @@ export function TerminalPane({
   }, [clearKeyboardRefitTimeouts]);
 
   useAnimatedReaction(
-    () => keyboardShift.value > 0,
+    () => isMobile && keyboardShift.value > 0,
     (next, prev) => {
       if (next === prev) {
         return;
       }
       runOnJS(pulseKeyboardRefits)();
     },
-    [pulseKeyboardRefits],
+    [isMobile, pulseKeyboardRefits],
   );
 
   useEffect(() => {
@@ -750,7 +763,7 @@ export function TerminalPane({
   if (!client || !isConnected) {
     return (
       <View style={styles.centerState}>
-        <Text style={styles.stateText}>Host is not connected</Text>
+        <Text style={styles.stateText}>{t("workspace.terminal.hostDisconnected")}</Text>
       </View>
     );
   }

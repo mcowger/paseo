@@ -6,7 +6,10 @@ import { join, basename, dirname, isAbsolute, resolve, sep } from "path";
 import net from "node:net";
 import { createHash } from "node:crypto";
 import stripAnsi from "strip-ansi";
-import { buildStringCommandShellInvocation } from "./string-command-shell.js";
+import {
+  buildStringCommandShellInvocation,
+  createStringCommandShellEnv,
+} from "./string-command-shell.js";
 import { readPaseoConfigJson, resolvePaseoConfigPath } from "./paseo-config-file.js";
 export {
   PaseoConfigRawSchema,
@@ -166,6 +169,7 @@ export type WorktreeSource =
       baseRefName: string;
       localBranchName?: string;
       pushRemoteUrl?: string;
+      trackOriginHead?: boolean;
     };
 
 export interface CreateWorktreeOptions {
@@ -203,6 +207,16 @@ export class UnknownBranchError extends Error {
     this.name = "UnknownBranchError";
     this.branchName = params.branchName;
     this.cwd = params.cwd;
+  }
+}
+
+export class InvalidGitBranchNameError extends Error {
+  readonly branchName: string;
+
+  constructor(branchName: string) {
+    super(`Invalid branch name: Git rejected ref name '${branchName}'`);
+    this.name = "InvalidGitBranchNameError";
+    this.branchName = branchName;
   }
 }
 
@@ -478,6 +492,7 @@ async function execSetupCommandStreamed(options: {
     const child = spawnProcess(shellInvocation.shell, shellInvocation.args, {
       cwd: options.cwd,
       env: options.env,
+      shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -596,7 +611,7 @@ export async function runWorktreeSetupCommands(options: {
       branchName: options.branchName,
       ...(options.repoRootPath ? { repoRootPath: options.repoRootPath } : {}),
     }));
-  const setupEnv = createExternalProcessEnv(process.env, runtimeEnv);
+  const setupEnv = createStringCommandShellEnv(createExternalProcessEnv(process.env, runtimeEnv));
 
   const results: WorktreeSetupCommandResult[] = [];
   for (const [index, cmd] of setupCommands.entries()) {
@@ -704,17 +719,19 @@ export async function runWorktreeTeardownCommands(options: {
     options.branchName ?? (await resolveBranchNameForWorktreePath(options.worktreePath));
   const worktreePort = readPaseoWorktreeRuntimePort(options.worktreePath);
 
-  const teardownEnv: NodeJS.ProcessEnv = createExternalProcessEnv(process.env, {
-    // Source checkout path is the original git repo root (shared across worktrees), not the
-    // worktree itself. This allows lifecycle scripts to copy or clean resources using paths
-    // from the source checkout.
-    PASEO_SOURCE_CHECKOUT_PATH: repoRootPath,
-    // Backward-compatible alias.
-    PASEO_ROOT_PATH: repoRootPath,
-    PASEO_WORKTREE_PATH: options.worktreePath,
-    PASEO_BRANCH_NAME: branchName,
-    ...(worktreePort !== null ? { PASEO_WORKTREE_PORT: String(worktreePort) } : {}),
-  });
+  const teardownEnv: NodeJS.ProcessEnv = createStringCommandShellEnv(
+    createExternalProcessEnv(process.env, {
+      // Source checkout path is the original git repo root (shared across worktrees), not the
+      // worktree itself. This allows lifecycle scripts to copy or clean resources using paths
+      // from the source checkout.
+      PASEO_SOURCE_CHECKOUT_PATH: repoRootPath,
+      // Backward-compatible alias.
+      PASEO_ROOT_PATH: repoRootPath,
+      PASEO_WORKTREE_PATH: options.worktreePath,
+      PASEO_BRANCH_NAME: branchName,
+      ...(worktreePort !== null ? { PASEO_WORKTREE_PORT: String(worktreePort) } : {}),
+    }),
+  );
 
   const results: WorktreeTeardownCommandResult[] = [];
   for (const cmd of teardownCommands) {
@@ -1191,6 +1208,13 @@ export const createWorktree = async ({
       remote: sourcePlan.pushRemote,
     });
   }
+  if (sourcePlan.trackingRemote) {
+    await configureWorktreeTrackingRemote({
+      cwd,
+      branchName: sourcePlan.branchName,
+      remote: sourcePlan.trackingRemote,
+    });
+  }
 
   writePaseoWorktreeMetadata(worktreePath, { baseRefName: sourcePlan.metadataBaseRefName });
 
@@ -1235,6 +1259,11 @@ interface WorktreeSourcePlan {
     name: string;
     url: string;
     headRef: string;
+    track: boolean;
+  };
+  trackingRemote?: {
+    name: string;
+    headRef: string;
   };
 }
 
@@ -1261,7 +1290,7 @@ async function resolveWorktreeSourcePlan({
       };
     }
     case "checkout-branch": {
-      validateWorktreeBranchName(source.branchName);
+      await validateExistingWorktreeBranchName(cwd, source.branchName);
       if (!(await localBranchExists(cwd, source.branchName))) {
         try {
           await runGitCommand(["fetch", "origin", `${source.branchName}:${source.branchName}`], {
@@ -1284,7 +1313,7 @@ async function resolveWorktreeSourcePlan({
     }
     case "checkout-github-pr": {
       const localBranchCandidate = source.localBranchName ?? source.headRef;
-      validateWorktreeBranchName(localBranchCandidate);
+      await validateExistingWorktreeBranchName(cwd, localBranchCandidate);
       const localBranchName = await resolveUniqueLocalBranchName(cwd, localBranchCandidate);
       const normalizedBaseRefName = normalizeRequiredBaseBranch(source.baseRefName);
       await runGitCommand(
@@ -1299,20 +1328,42 @@ async function resolveWorktreeSourcePlan({
           timeout: 120_000,
         },
       );
+      const trackingRemote = source.trackOriginHead
+        ? await tryFetchWorktreeTrackingRemote({
+            cwd,
+            remoteName: "origin",
+            headRef: source.headRef,
+          })
+        : undefined;
+      const remotePlan: Pick<WorktreeSourcePlan, "pushRemote" | "trackingRemote"> = {};
+      if (source.pushRemoteUrl) {
+        const remoteName = `paseo-pr-${source.githubPrNumber}`;
+        remotePlan.pushRemote = {
+          name: remoteName,
+          url: source.pushRemoteUrl,
+          headRef: source.headRef,
+          track: true,
+        };
+      } else if (source.trackOriginHead && localBranchName !== source.headRef) {
+        const originUrl = await getWorktreeRemotePushUrl(cwd, "origin");
+        if (originUrl) {
+          remotePlan.pushRemote = {
+            name: `paseo-pr-${source.githubPrNumber}`,
+            url: originUrl,
+            headRef: source.headRef,
+            track: false,
+          };
+        }
+      }
+      if (trackingRemote) {
+        remotePlan.trackingRemote = trackingRemote;
+      }
 
       return {
         branchName: localBranchName,
         metadataBaseRefName: normalizedBaseRefName,
         addArguments: [localBranchName],
-        ...(source.pushRemoteUrl
-          ? {
-              pushRemote: {
-                name: `paseo-pr-${source.githubPrNumber}`,
-                url: source.pushRemoteUrl,
-                headRef: source.headRef,
-              },
-            }
-          : {}),
+        ...remotePlan,
       };
     }
   }
@@ -1325,6 +1376,7 @@ async function configureWorktreePushRemote(options: {
     name: string;
     url: string;
     headRef: string;
+    track: boolean;
   };
 }): Promise<void> {
   await runGitCommand(["config", `remote.${options.remote.name}.url`, options.remote.url], {
@@ -1334,11 +1386,84 @@ async function configureWorktreePushRemote(options: {
     ["config", `remote.${options.remote.name}.push`, `HEAD:refs/heads/${options.remote.headRef}`],
     { cwd: options.cwd },
   );
-  await runGitCommand(["config", `branch.${options.branchName}.remote`, options.remote.name], {
+  await runGitCommand(["config", `branch.${options.branchName}.pushRemote`, options.remote.name], {
     cwd: options.cwd,
   });
+  if (!options.remote.track) {
+    return;
+  }
   await runGitCommand(
-    ["config", `branch.${options.branchName}.merge`, `refs/heads/${options.remote.headRef}`],
+    [
+      "config",
+      `remote.${options.remote.name}.fetch`,
+      `+refs/heads/${options.remote.headRef}:refs/remotes/${options.remote.name}/${options.remote.headRef}`,
+    ],
+    { cwd: options.cwd },
+  );
+  const trackingRemote = await tryFetchWorktreeTrackingRemote({
+    cwd: options.cwd,
+    remoteName: options.remote.name,
+    headRef: options.remote.headRef,
+  });
+  if (trackingRemote) {
+    await configureWorktreeTrackingRemote({
+      cwd: options.cwd,
+      branchName: options.branchName,
+      remote: trackingRemote,
+    });
+  }
+}
+
+async function tryFetchWorktreeTrackingRemote(options: {
+  cwd: string;
+  remoteName: string;
+  headRef: string;
+}): Promise<{ name: string; headRef: string } | undefined> {
+  const result = await runGitCommand(
+    [
+      "fetch",
+      options.remoteName,
+      `+refs/heads/${options.headRef}:refs/remotes/${options.remoteName}/${options.headRef}`,
+    ],
+    {
+      cwd: options.cwd,
+      timeout: 120_000,
+      acceptExitCodes: [0, 1, 128],
+    },
+  );
+  return result.exitCode === 0 ? { name: options.remoteName, headRef: options.headRef } : undefined;
+}
+
+async function getWorktreeRemotePushUrl(
+  cwd: string,
+  remoteName: string,
+): Promise<string | undefined> {
+  try {
+    const { stdout } = await runGitCommand(["remote", "get-url", "--push", remoteName], {
+      cwd,
+    });
+    const url = stdout.trim();
+    return url.length > 0 ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function configureWorktreeTrackingRemote(options: {
+  cwd: string;
+  branchName: string;
+  remote: {
+    name: string;
+    headRef: string;
+  };
+}): Promise<void> {
+  await runGitCommand(
+    [
+      "branch",
+      "--set-upstream-to",
+      `${options.remote.name}/${options.remote.headRef}`,
+      options.branchName,
+    ],
     { cwd: options.cwd },
   );
 }
@@ -1347,6 +1472,17 @@ function validateWorktreeBranchName(branchName: string): void {
   const validation = validateBranchSlug(branchName);
   if (!validation.valid) {
     throw new Error(`Invalid branch name: ${validation.error}`);
+  }
+}
+
+async function validateExistingWorktreeBranchName(cwd: string, branchName: string): Promise<void> {
+  const result = await runGitCommand(["check-ref-format", "--branch", branchName], {
+    cwd,
+    timeout: 30_000,
+    acceptExitCodes: [0, 1, 128],
+  });
+  if (result.exitCode !== 0) {
+    throw new InvalidGitBranchNameError(branchName);
   }
 }
 

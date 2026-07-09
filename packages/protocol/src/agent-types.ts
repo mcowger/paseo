@@ -6,6 +6,11 @@ export interface AgentMetadata {
   [key: string]: unknown;
 }
 
+export type AgentProviderNotice =
+  | { type: "info"; message: string }
+  | { type: "warning"; message: string }
+  | { type: "error"; message: string };
+
 /**
  * Stdio-based MCP server (spawns a subprocess).
  */
@@ -14,6 +19,11 @@ export interface McpStdioServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * When true, all tools from this server are always included in the prompt
+   * and never deferred behind tool search. Honored by the Claude provider.
+   */
+  alwaysLoad?: boolean;
 }
 
 /**
@@ -23,6 +33,11 @@ export interface McpHttpServerConfig {
   type: "http";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * When true, all tools from this server are always included in the prompt
+   * and never deferred behind tool search. Honored by the Claude provider.
+   */
+  alwaysLoad?: boolean;
 }
 
 /**
@@ -32,6 +47,11 @@ export interface McpSseServerConfig {
   type: "sse";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * When true, all tools from this server are always included in the prompt
+   * and never deferred behind tool search. Honored by the Claude provider.
+   */
+  alwaysLoad?: boolean;
 }
 
 /**
@@ -58,6 +78,7 @@ export interface AgentModelDefinition {
   description?: string;
   isDefault?: boolean;
   metadata?: AgentMetadata;
+  contextWindowMaxTokens?: number;
   thinkingOptions?: AgentSelectOption[];
   defaultThinkingOptionId?: string;
 }
@@ -116,8 +137,10 @@ export interface AgentFeatureSelect {
 export type AgentFeature = AgentFeatureToggle | AgentFeatureSelect;
 
 export interface AgentCapabilityFlags {
+  [capability: string]: boolean | undefined;
   supportsStreaming: boolean;
   supportsSessionPersistence: boolean;
+  supportsSessionListing?: boolean;
   supportsDynamicModes: boolean;
   supportsMcpServers: boolean;
   supportsReasoningStream: boolean;

@@ -5,6 +5,7 @@ import {
   createTerminal,
   ensureNodePtySpawnHelperExecutableForCurrentPlatform,
   resolveDefaultTerminalShell,
+  resolveTerminalSpawnCommand,
   humanizeProcessTitle,
   normalizeProcessTitle,
   resolveZshShellIntegrationDir,
@@ -203,9 +204,54 @@ describe("createTerminal", () => {
     ).toBe("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   });
 
+  it("passes profile commands through untouched on non-Windows", async () => {
+    const resolveExecutable = vi.fn(async () => "/usr/local/bin/claude");
+    const resolved = await resolveTerminalSpawnCommand("claude", ["--foo"], {
+      platform: "linux",
+      resolveExecutable,
+    });
+
+    expect(resolved).toEqual({ command: "claude", args: ["--foo"] });
+    // Non-Windows must not pay the executable-resolution cost.
+    expect(resolveExecutable).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original command when it cannot be resolved on Windows", async () => {
+    const resolved = await resolveTerminalSpawnCommand("claude", [], {
+      platform: "win32",
+      resolveExecutable: async () => null,
+    });
+
+    // Falls back to the bare command so the terminal surfaces the error itself.
+    expect(resolved).toEqual({ command: "claude", args: [] });
+  });
+
+  it("routes resolved .cmd shims through cmd.exe on Windows", async () => {
+    const resolved = await resolveTerminalSpawnCommand("claude", ["--foo"], {
+      platform: "win32",
+      env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+      resolveExecutable: async () => "C:\\npm\\claude.cmd",
+    });
+
+    expect(resolved).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/c", "C:\\npm\\claude.cmd", "--foo"],
+    });
+  });
+
+  it("uses the resolved .exe path directly on Windows", async () => {
+    const resolved = await resolveTerminalSpawnCommand("claude", ["--foo"], {
+      platform: "win32",
+      resolveExecutable: async () => "C:\\tools\\claude.exe",
+    });
+
+    expect(resolved).toEqual({ command: "C:\\tools\\claude.exe", args: ["--foo"] });
+  });
+
   it("creates a terminal session with an id, name, and cwd", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
       }),
     );
@@ -223,6 +269,7 @@ describe("createTerminal", () => {
       : "/bin/sh";
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         shell,
         env: { PS1: "$ " },
@@ -236,6 +283,7 @@ describe("createTerminal", () => {
   it("uses default shell if not specified", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
       }),
     );
@@ -249,6 +297,7 @@ describe("createTerminal", () => {
       : "/bin/sh";
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         shell,
         env: { PS1: "$ " },
@@ -266,6 +315,7 @@ describe("createTerminal", () => {
       : "/bin/sh";
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         shell,
         env: { PS1: "$ " },
@@ -282,6 +332,7 @@ describe("createTerminal", () => {
   it("reports per-row soft-wrap flags only when wrap flags are requested", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         cols: 40,
         rows: 10,
@@ -313,6 +364,7 @@ describe("createTerminal", () => {
   it("captures exit diagnostics from the terminal buffer", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         command: process.execPath,
         args: [
@@ -334,12 +386,58 @@ describe("createTerminal", () => {
     expect(Array.isArray(exitInfo.lastOutputLines)).toBe(true);
     expect(session.getExitInfo()).toEqual(exitInfo);
   });
+
+  it("retains the final lines after output far exceeds the recent-output char cap", async () => {
+    // Emit many small chunks whose total length is well past the 16000-char
+    // recent-output cap, so the chunk-trimming path runs repeatedly. The final
+    // distinctive lines must survive in the exit summary. The process is kept
+    // alive (no self-exit) so we can wait until the last chunk has actually been
+    // parsed by the headless terminal before killing — otherwise the exit
+    // summary races the async xterm parse and reads a stale buffer.
+    const session = trackSession(
+      await createTerminal({
+        workspaceId: "ws-test",
+        cwd: realpathSync(tmpdir()),
+        command: process.execPath,
+        args: [
+          "-e",
+          "for (let i = 0; i < 3000; i++) { process.stdout.write(`line-${i}\\n`); } setInterval(() => {}, 1000);",
+        ],
+      }),
+    );
+
+    // Poll the parsed buffer until the final line lands, so the exit summary
+    // (which reads the headless buffer) can't race the async xterm parse.
+    const finalLineParsed = (): boolean => {
+      const state = session.getState();
+      const rowText = (row: { char: string }[]): string => row.map((cell) => cell.char).join("");
+      return [...state.scrollback, ...state.grid].some((row) => rowText(row).includes("line-2999"));
+    };
+    const deadline = Date.now() + 10000;
+    while (!finalLineParsed()) {
+      if (Date.now() > deadline) {
+        throw new Error("Timed out waiting for the final line to be parsed");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const exitInfo = await new Promise<NonNullable<ReturnType<TerminalSession["getExitInfo"]>>>(
+      (resolve) => {
+        session.onExit((info) => resolve(info));
+        session.kill();
+      },
+    );
+
+    expect(exitInfo.lastOutputLines.length).toBeGreaterThan(0);
+    expect(exitInfo.lastOutputLines[exitInfo.lastOutputLines.length - 1]).toBe("line-2999");
+  });
 });
 
 describe.skipIf(isPlatform("win32"))("send input", () => {
   it("executes a simple echo command", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -366,6 +464,7 @@ describe.skipIf(isPlatform("win32"))("send input", () => {
   it("captures output from pwd in specified cwd", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -395,6 +494,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: homeDir,
         command: "/bin/zsh",
         args: ["-c", 'printf \'%s\\n%s\\n\' "${ZDOTDIR-}" "${PASEO_TEST_REAL_ZDOTDIR-}"'],
@@ -422,6 +522,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: packageRoot,
         command: process.execPath,
         args: [scriptPath, "run", "dev"],
@@ -445,6 +546,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
   it("emits OSC title updates to title listeners", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -470,6 +572,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
   it("keeps preset titles instead of applying OSC title updates", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -494,6 +597,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: packageRoot,
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -527,6 +631,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: packageRoot,
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -551,6 +656,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
   it("debounces rapid title changes and emits only the final title", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -594,6 +700,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: workingDir,
         shell: "/bin/zsh",
         env: {
@@ -676,6 +783,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
 
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: workingDir,
         shell: "/bin/zsh",
         env: {
@@ -703,6 +811,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
   it("clears already scheduled OSC title debounce timers when setting a user title", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -736,6 +845,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
   it("ignores later OSC title updates after setting a user title", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -765,6 +875,7 @@ describe.skipIf(isPlatform("win32"))("terminal title", () => {
   it("trims user-set titles and treats empty titles as no-ops", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ " },
@@ -795,6 +906,7 @@ describe.skipIf(isPlatform("win32"))("colors", () => {
   it("captures ANSI 16 color codes (mode 1)", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -824,6 +936,7 @@ describe.skipIf(isPlatform("win32"))("colors", () => {
   it("captures true color RGB (mode 3)", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -852,6 +965,7 @@ describe.skipIf(isPlatform("win32"))("colors", () => {
   it("captures background colors", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: "/tmp",
         shell: "/bin/sh",
         env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -878,6 +992,7 @@ describe("resize", () => {
   it("updates terminal dimensions on resize", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         rows: 24,
         cols: 80,
@@ -896,6 +1011,7 @@ describe("resize", () => {
   it("grid reflects new dimensions after resize", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         rows: 24,
         cols: 80,
@@ -913,6 +1029,7 @@ describe("resize", () => {
   it("exposes the current size without extracting full state", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
         rows: 24,
         cols: 80,
@@ -932,6 +1049,7 @@ describe("mouse events", () => {
   it("accepts mouse events without throwing", async () => {
     const session = trackSession(
       await createTerminal({
+        workspaceId: "ws-test",
         cwd: realpathSync(tmpdir()),
       }),
     );

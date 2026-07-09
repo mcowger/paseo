@@ -10,12 +10,14 @@ import {
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { Check, X } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
 import type { PendingPermission } from "@/types/shared";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { isWeb } from "@/constants/platform";
 import {
   areQuestionsAnswered,
   buildQuestionFormAnswers,
+  isQuestionAnswered,
   parseQuestionFormQuestions,
   questionShowsTextInput,
   resolveDismissLabel,
@@ -32,9 +34,17 @@ interface QuestionFormCardProps {
 
 const IS_WEB = isWeb;
 
-function getQuestionInputPlaceholder(question: QuestionFormQuestion): string {
+function getQuestionInputPlaceholder({
+  question,
+  answerPlaceholder,
+  otherPlaceholder,
+}: {
+  question: QuestionFormQuestion;
+  answerPlaceholder: string;
+  otherPlaceholder: string;
+}): string {
   return (
-    question.placeholder ?? (question.options.length === 0 ? "Type your answer..." : "Other...")
+    question.placeholder ?? (question.options.length === 0 ? answerPlaceholder : otherPlaceholder)
   );
 }
 
@@ -82,30 +92,49 @@ function QuestionOptionRow({
     () => [styles.optionDescription, { color: theme.colors.foregroundMuted }],
     [theme.colors.foregroundMuted],
   );
-  const accessibilityState = useMemo(() => ({ selected: isSelected }), [isSelected]);
+  const accessibilityState = useMemo(() => ({ checked: isSelected }), [isSelected]);
+
+  // Static left-side control: square for multi-select, circle for single-select.
+  // Always rendered so toggling only swaps fill/border — the row never reflows.
+  const controlStyle = useMemo(
+    () => [
+      styles.selectionControl,
+      multiSelect ? styles.selectionControlCheckbox : styles.selectionControlRadio,
+      {
+        borderColor: isSelected ? theme.colors.accent : theme.colors.foregroundMuted,
+        backgroundColor: isSelected && multiSelect ? theme.colors.accent : "transparent",
+      },
+    ],
+    [isSelected, multiSelect, theme.colors.accent, theme.colors.foregroundMuted],
+  );
+  const radioDotStyle = useMemo(
+    () => [styles.selectionRadioDot, { backgroundColor: theme.colors.accent }],
+    [theme.colors.accent],
+  );
 
   return (
     <Pressable
       style={pressableStyle}
       onPress={handlePress}
       disabled={isResponding}
-      accessibilityRole="button"
+      accessibilityRole={multiSelect ? "checkbox" : "radio"}
       accessibilityLabel={option.label}
       accessibilityState={accessibilityState}
-      aria-selected={isSelected}
+      aria-checked={isSelected}
     >
       <View style={styles.optionItemContent}>
+        <View style={controlStyle}>
+          {isSelected && multiSelect ? (
+            <Check size={12} color={theme.colors.accentForeground} />
+          ) : null}
+          {isSelected && !multiSelect ? <View style={radioDotStyle} /> : null}
+        </View>
         <View style={styles.optionTextBlock}>
           <Text style={optionLabelStyle}>{option.label}</Text>
           {option.description ? (
             <Text style={optionDescriptionStyle}>{option.description}</Text>
           ) : null}
         </View>
-        {isSelected ? (
-          <View style={styles.optionCheckSlot}>
-            <Check size={16} color={theme.colors.foregroundMuted} />
-          </View>
-        ) : null}
       </View>
     </Pressable>
   );
@@ -114,7 +143,9 @@ function QuestionOptionRow({
 interface QuestionNavButtonProps {
   index: number;
   total: number;
+  header: string;
   isActive: boolean;
+  isAnswered: boolean;
   isResponding: boolean;
   onSelect: (index: number) => void;
 }
@@ -122,7 +153,9 @@ interface QuestionNavButtonProps {
 function QuestionNavButton({
   index,
   total,
+  header,
   isActive,
+  isAnswered,
   isResponding,
   onSelect,
 }: QuestionNavButtonProps) {
@@ -161,7 +194,7 @@ function QuestionNavButton({
 
   return (
     <Pressable
-      accessibilityRole="button"
+      accessibilityRole="tab"
       accessibilityLabel={`Question ${index + 1} of ${total}`}
       accessibilityState={accessibilityState}
       aria-selected={isActive}
@@ -170,8 +203,58 @@ function QuestionNavButton({
       onPress={handlePress}
       disabled={isResponding}
     >
-      <Text style={textStyle}>{index + 1}</Text>
+      {isAnswered ? (
+        <Check
+          size={12}
+          color={isActive ? theme.colors.foreground : theme.colors.foregroundMuted}
+        />
+      ) : null}
+      <Text style={textStyle} numberOfLines={1}>
+        {header}
+      </Text>
     </Pressable>
+  );
+}
+
+interface QuestionNavProps {
+  questions: QuestionFormQuestion[];
+  activeIndex: number;
+  isAnswered: (qIndex: number) => boolean;
+  isResponding: boolean;
+  onSelect: (index: number) => void;
+}
+
+// Titled tabs (one per question header) with a check on answered ones. Hidden for
+// a lone question — a single "1 of 1" tab carries no information.
+function QuestionNav({
+  questions,
+  activeIndex,
+  isAnswered,
+  isResponding,
+  onSelect,
+}: QuestionNavProps) {
+  if (questions.length <= 1) {
+    return null;
+  }
+  return (
+    <View
+      style={styles.questionNav}
+      testID="question-form-question-nav"
+      accessibilityRole="tablist"
+    >
+      {questions.map((question, qIndex) => (
+        <QuestionNavButton
+          key={question.header}
+          index={qIndex}
+          total={questions.length}
+          header={question.header}
+          isActive={qIndex === activeIndex}
+          isAnswered={isAnswered(qIndex)}
+          isResponding={isResponding}
+          onSelect={onSelect}
+        />
+      ))}
+    </View>
   );
 }
 
@@ -238,6 +321,7 @@ function QuestionOtherInput({
 
 export function QuestionFormCard({ permission, onRespond, isResponding }: QuestionFormCardProps) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const isMobile = useIsCompactFormFactor();
   const questions = useMemo(
     () => parseQuestionFormQuestions(permission.request.input),
@@ -296,6 +380,10 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     ? Math.min(activeQuestionIndex, questions.length - 1)
     : 0;
   const activeQuestion = questions?.[resolvedActiveQuestionIndex];
+  const activeQuestionAnswered = activeQuestion
+    ? isQuestionAnswered(activeQuestion, resolvedActiveQuestionIndex, selections, otherTexts)
+    : false;
+  const isLastQuestion = questions ? resolvedActiveQuestionIndex === questions.length - 1 : true;
 
   const handleSubmit = useCallback(() => {
     if (!questions || !allAnswered || isResponding) return;
@@ -340,6 +428,21 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     setActiveQuestionIndex(index);
   }, []);
 
+  const navIsAnswered = useCallback(
+    (qIndex: number) =>
+      questions ? isQuestionAnswered(questions[qIndex], qIndex, selections, otherTexts) : false,
+    [questions, selections, otherTexts],
+  );
+
+  const handlePrimaryAction = useCallback(() => {
+    if (!isLastQuestion) {
+      if (!activeQuestionAnswered || isResponding) return;
+      setActiveQuestionIndex((index) => Math.min(index + 1, (questions?.length ?? 1) - 1));
+      return;
+    }
+    handleSubmit();
+  }, [activeQuestionAnswered, handleSubmit, isLastQuestion, isResponding, questions?.length]);
+
   const dismissButtonStyle = useCallback(
     ({ pressed, hovered }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.actionButton,
@@ -352,18 +455,21 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     [theme.colors.surface2, theme.colors.surface1, theme.colors.borderAccent],
   );
 
-  const submitDisabled = !allAnswered || isResponding;
+  const primaryDisabled = isResponding || (isLastQuestion ? !allAnswered : !activeQuestionAnswered);
+  const primaryActionLabel = isLastQuestion
+    ? t("message.question.submit")
+    : t("message.question.next");
   const submitButtonStyle = useCallback(
     ({ pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.actionButton,
       {
         backgroundColor: theme.colors.accent,
         borderColor: theme.colors.accent,
-        opacity: submitDisabled ? 0.5 : 1,
+        opacity: primaryDisabled ? 0.5 : 1,
       },
-      pressed && !submitDisabled ? styles.optionItemPressed : null,
+      pressed && !primaryDisabled ? styles.optionItemPressed : null,
     ],
-    [submitDisabled, theme.colors.accent],
+    [primaryDisabled, theme.colors.accent],
   );
 
   const containerStyle = useMemo(
@@ -380,9 +486,16 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     () => [styles.questionText, { color: theme.colors.foreground }],
     [theme.colors.foreground],
   );
-  const questionNavStyle = useMemo(
-    () => [styles.questionNav, isMobile && styles.questionNavMobile],
-    [isMobile],
+  // Single-select radios need a group; checkboxes are valid standalone.
+  const optionsGroupAccessibility = useMemo(
+    () =>
+      activeQuestion && !activeQuestion.multiSelect
+        ? ({
+            accessibilityRole: "radiogroup",
+            accessibilityLabel: activeQuestion.question,
+          } as const)
+        : {},
+    [activeQuestion],
   );
   const actionsContainerStyle = useMemo(
     () => [styles.actionsContainer, !isMobile && styles.actionsContainerDesktop],
@@ -402,40 +515,30 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     return null;
   }
 
-  const dismissLabel = resolveDismissLabel(questions);
+  const dismissLabel = resolveDismissLabel(questions, t("common.actions.dismiss"));
   const selected = selections[resolvedActiveQuestionIndex] ?? new Set<number>();
   const otherText = otherTexts[resolvedActiveQuestionIndex] ?? "";
   const showTextInput = activeQuestion ? questionShowsTextInput(activeQuestion) : false;
 
   return (
     <View style={containerStyle} testID="question-form-card">
-      <View style={styles.questionTopRow}>
-        <View style={styles.questionHeader}>
-          <Text testID="question-form-current-question" style={questionTextStyle}>
-            {activeQuestion?.question}
-          </Text>
-        </View>
-        <View style={questionNavStyle} testID="question-form-question-nav">
-          {questions.map((question, qIndex) => {
-            const isActive = qIndex === resolvedActiveQuestionIndex;
-            return (
-              <QuestionNavButton
-                key={question.header}
-                index={qIndex}
-                total={questions.length}
-                isActive={isActive}
-                isResponding={isResponding}
-                onSelect={handleSelectQuestion}
-              />
-            );
-          })}
-        </View>
+      <QuestionNav
+        questions={questions}
+        activeIndex={resolvedActiveQuestionIndex}
+        isAnswered={navIsAnswered}
+        isResponding={isResponding}
+        onSelect={handleSelectQuestion}
+      />
+      <View style={styles.questionHeader}>
+        <Text testID="question-form-current-question" style={questionTextStyle}>
+          {activeQuestion?.question}
+        </Text>
       </View>
 
       {activeQuestion ? (
         <View key={activeQuestion.question} style={styles.questionBlock}>
           {activeQuestion.options.length > 0 ? (
-            <View style={styles.optionsWrap}>
+            <View style={styles.optionsWrap} {...optionsGroupAccessibility}>
               {activeQuestion.options.map((opt, optIndex) => (
                 <QuestionOptionRow
                   key={opt.label}
@@ -455,10 +558,14 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
               qIndex={resolvedActiveQuestionIndex}
               accessibilityLabel={activeQuestion.question}
               value={otherText}
-              placeholder={getQuestionInputPlaceholder(activeQuestion)}
+              placeholder={getQuestionInputPlaceholder({
+                question: activeQuestion,
+                answerPlaceholder: t("message.question.answerPlaceholder"),
+                otherPlaceholder: t("message.question.otherPlaceholder"),
+              })}
               isResponding={isResponding}
               onChange={setOtherText}
-              onSubmit={handleSubmit}
+              onSubmit={handlePrimaryAction}
             />
           ) : null}
         </View>
@@ -485,10 +592,10 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
 
         <Pressable
           style={submitButtonStyle}
-          onPress={handleSubmit}
-          disabled={submitDisabled}
+          onPress={handlePrimaryAction}
+          disabled={primaryDisabled}
           accessibilityRole="button"
-          accessibilityLabel="Submit"
+          accessibilityLabel={primaryActionLabel}
           testID="question-form-primary-action"
         >
           {respondingAction === "submit" ? (
@@ -496,7 +603,7 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
           ) : (
             <View style={styles.actionContent}>
               <Check size={14} color={submitActionTextColor} />
-              <Text style={submitActionTextStyle}>Submit</Text>
+              <Text style={submitActionTextStyle}>{primaryActionLabel}</Text>
             </View>
           )}
         </Pressable>
@@ -514,12 +621,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   questionBlock: {
     gap: theme.spacing[2],
-  },
-  questionTopRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: theme.spacing[3],
   },
   questionHeader: {
     flexDirection: "row",
@@ -540,24 +641,24 @@ const styles = StyleSheet.create((theme) => ({
   },
   questionNav: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
-    justifyContent: "flex-end",
     gap: theme.spacing[1],
-  },
-  questionNavMobile: {
-    paddingRight: theme.spacing[1],
+    paddingHorizontal: theme.spacing[3],
   },
   questionNavButton: {
-    minWidth: 28,
-    height: 28,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 999,
+    gap: theme.spacing[1],
+    minHeight: 28,
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.borderRadius.md,
     borderWidth: theme.borderWidth[1],
   },
   questionNavText: {
-    fontSize: theme.fontSize.xs,
-    fontWeight: "700",
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
   },
   optionItem: {
     flexDirection: "row",
@@ -572,25 +673,40 @@ const styles = StyleSheet.create((theme) => ({
   optionItemContent: {
     flex: 1,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: theme.spacing[2],
   },
   optionTextBlock: {
     flex: 1,
-    gap: 2,
+    gap: theme.spacing[1],
   },
   optionLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.semibold,
+    lineHeight: 22,
   },
   optionDescription: {
-    fontSize: theme.fontSize.xs,
-    lineHeight: 16,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 20,
   },
-  optionCheckSlot: {
-    width: 16,
+  selectionControl: {
+    width: 18,
+    height: 18,
     alignItems: "center",
     justifyContent: "center",
-    marginLeft: "auto",
+    borderWidth: theme.borderWidth[1],
+    marginTop: 2, // optical-align 18px control to the 22px label first line
+  },
+  selectionControlCheckbox: {
+    borderRadius: theme.borderRadius.base,
+  },
+  selectionControlRadio: {
+    borderRadius: 999,
+  },
+  selectionRadioDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
   },
   otherInput: {
     borderWidth: 1,

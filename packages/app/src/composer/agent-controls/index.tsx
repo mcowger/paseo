@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   View,
   Text,
@@ -19,7 +20,9 @@ import {
 } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
-import { Brain, ChevronDown, ListTodo, Settings2, ShieldCheck, Zap } from "lucide-react-native";
+import { Brain, ListTodo, Settings2, ShieldCheck, Zap } from "lucide-react-native";
+import { DropdownTrigger } from "@/components/ui/dropdown-trigger";
+import { ComboboxTrigger } from "@/components/ui/combobox-trigger";
 import { getProviderIcon } from "@/components/provider-icons";
 import { CombinedModelSelector } from "@/components/combined-model-selector";
 import {
@@ -36,12 +39,7 @@ import {
   toggleFavoriteModel,
   useFormPreferences,
 } from "@/hooks/use-form-preferences";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Combobox, ComboboxItem, type ComboboxOption } from "@/components/ui/combobox";
 import { DraftAgentModeControl, AgentModeControl } from "@/composer/agent-controls/mode-control";
 import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
@@ -56,13 +54,14 @@ import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manife
 import {
   getFeatureHighlightColor,
   getFeatureTooltip,
-  getAgentControlHint,
+  getAgentControlHintKey,
   formatThinkingOptionLabel,
   resolveAgentModelSelection,
 } from "@/composer/agent-controls/utils";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useToast } from "@/contexts/toast-context";
 import { toErrorMessage } from "@/utils/error-messages";
+import { showProviderNoticeToast } from "@/utils/provider-notice-toast";
 
 interface AgentControlOption {
   id: string;
@@ -415,6 +414,7 @@ function ControlledAgentControls({
   isCompactLayout,
 }: ControlledAgentControlsProps) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const isCompactFormFactor = useIsCompactFormFactor();
   const isCompact = isCompactLayout ?? isCompactFormFactor;
   const [activeSheet, setActiveSheet] = useState<ActiveSheet>(null);
@@ -432,7 +432,11 @@ function ControlledAgentControls({
     onSelectThinkingOption && thinkingOptions && thinkingOptions.length > 0,
   );
 
-  const displayProvider = findOptionLabel(providerOptions, selectedProviderId, "Provider");
+  const displayProvider = findOptionLabel(
+    providerOptions,
+    selectedProviderId,
+    t("agentControls.provider.fallback"),
+  );
   const formattedThinkingOptions = useMemo(
     () => toThinkingControlOptions(thinkingOptions),
     [thinkingOptions],
@@ -440,7 +444,7 @@ function ControlledAgentControls({
   const displayThinking = findOptionLabel(
     formattedThinkingOptions,
     selectedThinkingOptionId,
-    formattedThinkingOptions[0]?.label ?? "Unknown",
+    formattedThinkingOptions[0]?.label ?? t("agentControls.thinking.unknown"),
   );
 
   const ProviderIcon = resolveProviderIcon(provider);
@@ -709,6 +713,7 @@ const DESKTOP_SEARCH_THRESHOLD = 6;
 
 function DesktopAgentControlsContent(props: DesktopAgentControlsContentProps) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const {
     provider,
     providerOptions,
@@ -757,19 +762,18 @@ function DesktopAgentControlsContent(props: DesktopAgentControlsContentProps) {
     <>
       {providerOptions && providerOptions.length > 0 ? (
         <>
-          <Pressable
+          <ComboboxTrigger
             ref={providerAnchorRef}
             collapsable={false}
             disabled={disabled || !canSelectProvider}
             onPress={handleProviderPress}
             style={providerPressableStyle}
             accessibilityRole="button"
-            accessibilityLabel="Select agent provider"
+            accessibilityLabel={t("agentControls.provider.select")}
             testID="agent-provider-selector"
           >
             <Text style={styles.modeBadgeText}>{displayProvider}</Text>
-            <ChevronDown size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
-          </Pressable>
+          </ComboboxTrigger>
           <Combobox
             options={comboboxProviderOptions}
             value={selectedProviderId ?? ""}
@@ -801,11 +805,13 @@ function DesktopAgentControlsContent(props: DesktopAgentControlsContentProps) {
                 onRetryProvider={onRetryModelProvider}
                 isRetryingProvider={isRetryingModelProvider}
                 serverId={modelSelectorServerId}
+                desktopPlacement="top-start"
+                desktopMinWidth={360}
               />
             </View>
           </TooltipTrigger>
           <TooltipContent side="top" align="center" offset={8}>
-            <Text style={styles.tooltipText}>{getAgentControlHint("model")}</Text>
+            <Text style={styles.tooltipText}>{t(getAgentControlHintKey("model"))}</Text>
           </TooltipContent>
         </Tooltip>
       ) : null}
@@ -814,23 +820,24 @@ function DesktopAgentControlsContent(props: DesktopAgentControlsContentProps) {
         <>
           <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
             <TooltipTrigger asChild triggerRefProp="ref">
-              <Pressable
+              <ComboboxTrigger
                 ref={thinkingAnchorRef}
                 collapsable={false}
                 disabled={disabled || !canSelectThinking}
                 onPress={handleThinkingPress}
                 style={thinkingPressableStyle}
                 accessibilityRole="button"
-                accessibilityLabel={`Select thinking option (${displayThinking})`}
+                accessibilityLabel={t("agentControls.thinking.selectWithValue", {
+                  value: displayThinking,
+                })}
                 testID="agent-thinking-selector"
               >
                 <Brain size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
                 <Text style={styles.modeBadgeText}>{displayThinking}</Text>
-                <ChevronDown size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
-              </Pressable>
+              </ComboboxTrigger>
             </TooltipTrigger>
             <TooltipContent side="top" align="center" offset={8}>
-              <Text style={styles.tooltipText}>{getAgentControlHint("thinking")}</Text>
+              <Text style={styles.tooltipText}>{t(getAgentControlHintKey("thinking"))}</Text>
             </TooltipContent>
           </Tooltip>
           <Combobox
@@ -901,6 +908,7 @@ interface SheetAgentControlsContentProps {
 
 function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const {
     provider,
     selectedModelId,
@@ -936,6 +944,10 @@ function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
 
   const hasThinking = comboboxThinkingOptions.length > 0;
   const hasFeatures = Boolean(features && features.length > 0);
+  const featuresSheetHeader = useMemo<SheetHeader>(
+    () => ({ title: t("agentControls.features.title") }),
+    [t],
+  );
 
   const handleOpenThinking = useCallback(() => handleOpenSheet("thinking"), [handleOpenSheet]);
   const handleOpenFeatures = useCallback(() => handleOpenSheet("features"), [handleOpenSheet]);
@@ -1002,6 +1014,8 @@ function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
           isRetryingProvider={isRetryingModelProvider}
           renderTrigger={renderModelTrigger}
           serverId={modelSelectorServerId}
+          desktopPlacement="top-start"
+          desktopMinWidth={360}
         />
       ) : null}
 
@@ -1012,7 +1026,7 @@ function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
           disabled={disabled || !canSelectThinking}
           style={thinkingButtonStyle}
           accessibilityRole="button"
-          accessibilityLabel="Select thinking option"
+          accessibilityLabel={t("agentControls.thinking.select")}
           testID="agent-controls-thinking"
         >
           <Brain size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
@@ -1025,7 +1039,7 @@ function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
           disabled={disabled}
           style={featuresButtonStyle}
           accessibilityRole="button"
-          accessibilityLabel="Open agent features"
+          accessibilityLabel={t("agentControls.features.open")}
           testID="agent-controls-features"
         >
           <Settings2 size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
@@ -1038,7 +1052,7 @@ function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
           value={selectedThinkingOptionId ?? ""}
           onSelect={handleSelectThinkingAndClose}
           searchable={false}
-          title="Thinking"
+          title={t("agentControls.thinking.title")}
           open={activeSheet === "thinking"}
           onOpenChange={handleThinkingSheetOpenChange}
           anchorRef={thinkingAnchorRef}
@@ -1047,7 +1061,7 @@ function SheetAgentControlsContent(props: SheetAgentControlsContentProps) {
       ) : null}
 
       <AdaptiveModalSheet
-        header={FEATURES_SHEET_HEADER}
+        header={featuresSheetHeader}
         visible={activeSheet === "features"}
         onClose={handleCloseSheet}
         testID="agent-features-sheet"
@@ -1159,7 +1173,7 @@ function DesktopFeatureItem({
       <DropdownMenu open={openSelector === featureSelector} onOpenChange={handleFeatureOpenChange}>
         <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
           <TooltipTrigger asChild triggerRefProp="ref">
-            <DropdownMenuTrigger
+            <DropdownTrigger
               disabled={disabled}
               style={selectPressableStyle}
               accessibilityRole="button"
@@ -1168,8 +1182,7 @@ function DesktopFeatureItem({
             >
               <FeatureIcon size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
               <Text style={styles.modeBadgeText}>{selectedOption?.label ?? feature.label}</Text>
-              <ChevronDown size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
-            </DropdownMenuTrigger>
+            </DropdownTrigger>
           </TooltipTrigger>
           <TooltipContent side="top" align="center" offset={8}>
             <Text style={styles.tooltipText}>{getFeatureTooltip(feature)}</Text>
@@ -1206,6 +1219,7 @@ function SheetFeatureItem({
   onSetFeature?: (featureId: string, value: unknown) => void;
 }) {
   const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const featureSelector: AgentControlSelector = `feature-${feature.id}`;
 
   const handleFeatureOpenChange = useMemo(
@@ -1257,7 +1271,9 @@ function SheetFeatureItem({
             )}
           />
           <Text style={styles.sheetSelectText}>{feature.label}</Text>
-          <Text style={styles.modeBadgeText}>{feature.value ? "On" : "Off"}</Text>
+          <Text style={styles.modeBadgeText}>
+            {feature.value ? t("agentControls.features.on") : t("agentControls.features.off")}
+          </Text>
         </Pressable>
       </View>
     );
@@ -1271,7 +1287,7 @@ function SheetFeatureItem({
           open={openSelector === featureSelector}
           onOpenChange={handleFeatureOpenChange}
         >
-          <DropdownMenuTrigger
+          <DropdownTrigger
             disabled={disabled}
             style={togglePressableStyle}
             accessibilityRole="button"
@@ -1279,8 +1295,7 @@ function SheetFeatureItem({
             testID={`agent-feature-${feature.id}`}
           >
             <Text style={styles.sheetSelectText}>{selectedOption?.label ?? feature.label}</Text>
-            <ChevronDown size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
-          </DropdownMenuTrigger>
+          </DropdownTrigger>
           <DropdownMenuContent side="top" align="start">
             {feature.options.map((option) => (
               <FeatureOptionMenuItem
@@ -1343,8 +1358,6 @@ function ThinkingComboboxOption({
     />
   );
 }
-
-const FEATURES_SHEET_HEADER: SheetHeader = { title: "Features" };
 
 export const AgentControls = memo(function AgentControls({
   agentId,
@@ -1478,10 +1491,13 @@ export const AgentControls = memo(function AgentControls({
           console.warn("[AgentControls] persist thinking preference failed", error);
         });
       }
-      void client.setAgentThinkingOption(agentId, thinkingOptionId).catch((error) => {
-        console.warn("[AgentControls] setAgentThinkingOption failed", error);
-        toast.error(toErrorMessage(error));
-      });
+      void client
+        .setAgentThinkingOption(agentId, thinkingOptionId)
+        .then((notice) => showProviderNoticeToast(toast, notice))
+        .catch((error) => {
+          console.warn("[AgentControls] setAgentThinkingOption failed", error);
+          toast.error(toErrorMessage(error));
+        });
     },
     [activeModelId, agentId, agentProvider, client, toast, updatePreferences],
   );
@@ -1672,6 +1688,8 @@ export function DraftAgentControls({
           onRetryProvider={onRetryModelProvider}
           isRetryingProvider={isRetryingModelProvider}
           serverId={modelSelectorServerId}
+          desktopPlacement="top-start"
+          desktopMinWidth={360}
         />
         {selectedProvider ? (
           <ControlledAgentControls

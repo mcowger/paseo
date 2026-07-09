@@ -1,12 +1,18 @@
-import { spawn, type ChildProcess, execFileSync, execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { Buffer } from "node:buffer";
 import dotenv from "dotenv";
+import { loadDaemonClientConstructor } from "./helpers/daemon-client-loader";
+import { createNodeWebSocketFactory, type NodeWebSocketFactory } from "./helpers/node-ws-factory";
 import { forkPaseoHomeMetadata, resolvePaseoHomePath } from "./helpers/paseo-home-fork";
+import { withDisabledE2ESpeechEnv } from "./helpers/speech-env";
+
+const wranglerCliPath = path.resolve(__dirname, "../node_modules/wrangler/bin/wrangler.js");
 
 interface WaitForServerOptions {
   host?: string;
@@ -20,7 +26,7 @@ async function getAvailablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once("error", reject);
-    server.listen(0, () => {
+    server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       if (!address || typeof address === "string") {
         server.close(() => reject(new Error("Failed to acquire port")));
@@ -30,6 +36,14 @@ async function getAvailablePort(): Promise<number> {
     });
   });
 }
+
+const RESERVED_LOCAL_PORTS = new Set([
+  // Default developer daemon.
+  6767,
+  // OpenCode's default local server port. Some provider probes can spawn it
+  // during daemon startup, so the E2E daemon must not choose the same port.
+  61680,
+]);
 
 function createLineBuffer(maxLines = 120): { add: (line: string) => void; dump: () => string } {
   const lines: string[] = [];
@@ -143,6 +157,67 @@ async function stopProcess(child: ChildProcess | null): Promise<void> {
   });
 }
 
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readSupervisorPidLock(home: string): Promise<number | null> {
+  try {
+    const content = await readFile(path.join(home, "paseo.pid"), "utf8");
+    const parsed = JSON.parse(content) as { pid?: unknown };
+    return typeof parsed.pid === "number" ? parsed.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function stopProcessByPid(pid: number): Promise<void> {
+  if (!isProcessRunning(pid)) {
+    return;
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (!isProcessRunning(pid)) {
+      return;
+    }
+    await sleep(100);
+  }
+
+  if (isProcessRunning(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      return;
+    }
+  }
+}
+
+async function stopCurrentDaemonFromPidLock(): Promise<void> {
+  if (!paseoHome) {
+    return;
+  }
+  if (process.env.E2E_DAEMON_PORT === "6767") {
+    throw new Error("Refusing to clean up daemon PID lock for developer daemon port 6767.");
+  }
+
+  const pid = await readSupervisorPidLock(paseoHome);
+  if (pid === null) {
+    return;
+  }
+  await stopProcessByPid(pid);
+}
+
 function summarizeOpenAiErrorBody(body: string): string {
   const trimmed = body.trim();
   if (!trimmed) {
@@ -188,7 +263,7 @@ async function isOpenAiApiKeyUsable(apiKey: string | undefined): Promise<boolean
 let daemonProcess: ChildProcess | null = null;
 let metroProcess: ChildProcess | null = null;
 let paseoHome: string | null = null;
-let fakeToolBinDir: string | null = null;
+let fakeEditorBinDir: string | null = null;
 let relayProcess: ChildProcess | null = null;
 
 function resolveOptionalPaseoHomeEnv(value: string | undefined): string | null {
@@ -209,81 +284,24 @@ interface OfferPayload {
   relay: { endpoint: string };
 }
 
-async function createFakeToolBin(): Promise<string> {
-  const binDir = await mkdtemp(path.join(tmpdir(), "paseo-e2e-tool-bin-"));
-  const ghPath = path.join(binDir, "gh");
-  await writeFile(
-    ghPath,
-    `#!/usr/bin/env node
-const { spawnSync } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const args = process.argv.slice(2);
-
-function findRealGh() {
-  const fakeBinDir = __dirname;
-  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
-    if (dir === fakeBinDir) continue;
-    const candidate = path.join(dir, "gh");
-    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch {}
-  }
-  return null;
+interface DaemonClientConfig {
+  url: string;
+  clientId: string;
+  clientType: "cli";
+  webSocketFactory: NodeWebSocketFactory;
 }
 
-function forwardToRealGh() {
-  const realGh = findRealGh();
-  if (!realGh) { console.error("[fake-gh] real gh not found in PATH"); process.exit(1); }
-  const result = spawnSync(realGh, process.argv.slice(2), { stdio: "inherit", env: process.env });
-  process.exit(result.status ?? 1);
+interface PairingDaemonClient {
+  connect(): Promise<void>;
+  close(): Promise<void>;
+  getDaemonPairingOffer(): Promise<{
+    relayEnabled: boolean;
+    url: string;
+  }>;
 }
 
-if (args[0] === "auth" && args[1] === "status") {
-  process.exit(0);
-}
-
-if (args[0] === "pr" && args[1] === "list") {
-  console.log(JSON.stringify([
-    {
-      number: 515,
-      title: "Review selected start ref",
-      url: "https://github.com/getpaseo/paseo/pull/515",
-      state: "OPEN",
-      body: "Fixture pull request for app e2e.",
-      labels: [],
-      baseRefName: "main",
-      headRefName: "feature/start-from-pr"
-    }
-  ]));
-  process.exit(0);
-}
-
-if (args[0] === "pr" && args[1] === "view" && args[2] === "--json" && args[3]) {
-  const fixture = path.join(process.cwd(), ".paseo-e2e-pr.json");
-  if (fs.existsSync(fixture)) {
-    console.log(fs.readFileSync(fixture, "utf8"));
-    process.exit(0);
-  }
-  forwardToRealGh();
-}
-
-if (args[0] === "api" && args[1] === "graphql") {
-  const fixture = path.join(process.cwd(), ".paseo-e2e-timeline.json");
-  if (fs.existsSync(fixture)) {
-    console.log(fs.readFileSync(fixture, "utf8"));
-    process.exit(0);
-  }
-  forwardToRealGh();
-}
-
-if (args[0] === "issue" && args[1] === "list") {
-  console.log("[]");
-  process.exit(0);
-}
-
-forwardToRealGh();
-`,
-  );
-  await chmod(ghPath, 0o755);
+async function createFakeEditorBin(): Promise<string> {
+  const binDir = await mkdtemp(path.join(tmpdir(), "paseo-e2e-editor-bin-"));
 
   const fakeEditorSource = `#!/usr/bin/env node
 const fs = require("fs");
@@ -343,29 +361,29 @@ function decodeOfferFromFragmentUrl(url: string): OfferPayload {
   return offer as OfferPayload;
 }
 
-function loadPairingOfferFromCli(repoRoot: string, paseoHomePath: string): OfferPayload {
-  const stdout = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "packages/cli/src/index.ts", "daemon", "pair", "--json"],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PASEO_HOME: paseoHomePath,
-      },
-      encoding: "utf8",
-    },
-  );
-  const payload = JSON.parse(stdout) as { relayEnabled?: boolean; url?: string | null };
-  if (payload.relayEnabled !== true || typeof payload.url !== "string") {
-    throw new Error(`Unexpected daemon pair response: ${stdout}`);
+async function loadPairingOfferFromDaemon(port: number): Promise<OfferPayload> {
+  const DaemonClient = await loadDaemonClientConstructor<DaemonClientConfig, PairingDaemonClient>();
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${port}/ws`,
+    clientId: `playwright-global-setup-${randomUUID()}`,
+    clientType: "cli",
+    webSocketFactory: createNodeWebSocketFactory(),
+  });
+
+  await client.connect();
+  try {
+    const pairing = await client.getDaemonPairingOffer();
+    if (!pairing.relayEnabled || !pairing.url) {
+      throw new Error("Daemon returned a disabled pairing offer");
+    }
+    return decodeOfferFromFragmentUrl(pairing.url);
+  } finally {
+    await client.close().catch(() => {});
   }
-  return decodeOfferFromFragmentUrl(payload.url);
 }
 
-async function waitForPairingOfferFromCli(args: {
-  repoRoot: string;
-  paseoHome: string;
+async function waitForPairingOfferFromDaemon(args: {
+  port: number;
   timeoutMs?: number;
 }): Promise<OfferPayload> {
   const timeoutMs = args.timeoutMs ?? 15000;
@@ -374,7 +392,7 @@ async function waitForPairingOfferFromCli(args: {
 
   while (Date.now() - start < timeoutMs) {
     try {
-      return loadPairingOfferFromCli(args.repoRoot, args.paseoHome);
+      return await loadPairingOfferFromDaemon(args.port);
     } catch (error) {
       lastError = error;
       await sleep(100);
@@ -382,15 +400,10 @@ async function waitForPairingOfferFromCli(args: {
   }
 
   throw new Error(
-    `Timed out waiting for \`paseo daemon pair --json\` to produce a pairing offer: ${
+    `Timed out waiting for daemon pairing offer: ${
       lastError instanceof Error ? lastError.message : String(lastError)
     }`,
   );
-}
-
-interface DictationConfig {
-  openAiUsable: boolean;
-  localModelsDir: string | null;
 }
 
 async function loadEnvTestFile(repoRoot: string): Promise<void> {
@@ -425,7 +438,7 @@ async function applyPaseoHomeFork(targetHome: string): Promise<void> {
   }
 }
 
-async function resolveDictationConfig(): Promise<DictationConfig> {
+async function logSpeechHarnessConfig(): Promise<void> {
   const openAiUsable = await isOpenAiApiKeyUsable(process.env.OPENAI_API_KEY);
   const defaultLocalModelsDir = path.join(
     process.env.HOME ?? "",
@@ -436,23 +449,20 @@ async function resolveDictationConfig(): Promise<DictationConfig> {
   const hasDefaultLocalModelsDir =
     defaultLocalModelsDir.trim().length > 0 && existsSync(defaultLocalModelsDir);
 
-  // Fork PRs run without secrets and usually without local models. Don't crash
-  // the whole Playwright run — disable dictation/voice and let tests that need
-  // them gate on PASEO_DICTATION_ENABLED.
+  // Default app E2E does not cover speech flows. Keep speech disabled here so
+  // unrelated tests never start background local-model downloads.
   if (!openAiUsable && !hasDefaultLocalModelsDir) {
     console.warn(
-      "[e2e] Neither OPENAI_API_KEY nor local speech models found — running with dictation/voice disabled. " +
+      "[e2e] Neither OPENAI_API_KEY nor local speech models found — app E2E keeps dictation/voice disabled. " +
         "Tests that require dictation should gate on PASEO_DICTATION_ENABLED.",
     );
-    return { openAiUsable: false, localModelsDir: null };
+    return;
   }
 
-  const dictationProvider = openAiUsable ? "openai" : "local";
-  const localModelsDir = dictationProvider === "local" ? defaultLocalModelsDir : null;
+  const speechAssets = openAiUsable ? "OpenAI" : `local models at ${defaultLocalModelsDir}`;
   console.log(
-    `[e2e] Dictation STT provider: ${dictationProvider}${openAiUsable ? "" : " (OpenAI probe failed)"}`,
+    `[e2e] Speech assets available from ${speechAssets}; app E2E keeps dictation/voice disabled.`,
   );
-  return { openAiUsable, localModelsDir };
 }
 
 interface RelayStreamState {
@@ -540,7 +550,7 @@ async function awaitRelayReady(
 async function getAvailablePortExcluding(excludedPorts: Set<number>): Promise<number> {
   for (;;) {
     const port = await getAvailablePort();
-    if (!excludedPorts.has(port)) {
+    if (!excludedPorts.has(port) && !RESERVED_LOCAL_PORTS.has(port)) {
       return port;
     }
   }
@@ -557,8 +567,18 @@ async function startRelay(excludedPorts: Set<number>): Promise<number> {
     const state: RelayStreamState = { failureLine: null, readyForSelectedPort: false };
 
     relayProcess = spawn(
-      "npx",
-      ["wrangler", "dev", "--local", "--ip", "127.0.0.1", "--port", String(relayPort)],
+      process.execPath,
+      [
+        wranglerCliPath,
+        "dev",
+        "--local",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        String(relayPort),
+        "--live-reload=false",
+        "--show-interactive-dev-session=false",
+      ],
       {
         cwd: relayDir,
         env: { ...process.env },
@@ -587,13 +607,23 @@ async function startRelay(excludedPorts: Set<number>): Promise<number> {
   );
 }
 
-function startMetro(metroPort: number, buffer: ReturnType<typeof createLineBuffer>): ChildProcess {
+function startMetro(input: {
+  metroPort: number;
+  daemonPort: number;
+  buffer: ReturnType<typeof createLineBuffer>;
+}): ChildProcess {
   const appDir = path.resolve(__dirname, "..");
-  const child = spawn("npx", ["expo", "start", "--web", "--port", String(metroPort)], {
+  const child = spawn("npx", ["expo", "start", "--web", "--port", String(input.metroPort)], {
     cwd: appDir,
     env: {
       ...process.env,
       BROWSER: "none",
+      ...(process.env.E2E_DESKTOP_RUNTIME === "1"
+        ? {
+            PASEO_WEB_PLATFORM: "electron",
+            EXPO_PUBLIC_LOCAL_DAEMON: `127.0.0.1:${input.daemonPort}`,
+          }
+        : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
@@ -605,7 +635,7 @@ function startMetro(metroPort: number, buffer: ReturnType<typeof createLineBuffe
       .split("\n")
       .filter((line) => line.trim());
     for (const line of lines) {
-      buffer.add(`[stdout] ${line}`);
+      input.buffer.add(`[stdout] ${line}`);
       console.log(`[metro] ${line}`);
     }
   });
@@ -616,7 +646,7 @@ function startMetro(metroPort: number, buffer: ReturnType<typeof createLineBuffe
       .split("\n")
       .filter((line) => line.trim());
     for (const line of lines) {
-      buffer.add(`[stderr] ${line}`);
+      input.buffer.add(`[stderr] ${line}`);
       console.error(`[metro] ${line}`);
     }
   });
@@ -629,41 +659,30 @@ interface DaemonSpawnArgs {
   relayPort: number;
   metroPort: number;
   paseoHome: string;
-  fakeToolBinDir: string;
+  fakeEditorBinDir: string;
   editorRecordPath: string;
-  dictation: DictationConfig;
   buffer: ReturnType<typeof createLineBuffer>;
 }
 
 function startDaemon(args: DaemonSpawnArgs): ChildProcess {
   const serverDir = path.resolve(__dirname, "../../..", "packages/server");
   const tsxBin = execSync("which tsx").toString().trim();
-  const { openAiUsable, localModelsDir } = args.dictation;
+  const env = withDisabledE2ESpeechEnv({
+    ...process.env,
+    PATH: `${args.fakeEditorBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    PASEO_HOME: args.paseoHome,
+    PASEO_E2E_EDITOR_RECORD_PATH: args.editorRecordPath,
+    PASEO_SERVER_ID: "srv_e2e_test_daemon",
+    PASEO_LISTEN: `0.0.0.0:${args.port}`,
+    PASEO_RELAY_ENDPOINT: `127.0.0.1:${args.relayPort}`,
+    PASEO_CORS_ORIGINS: `http://localhost:${args.metroPort}`,
+    PASEO_NODE_ENV: "development",
+    NODE_ENV: "development",
+  });
 
   const child = spawn(tsxBin, ["scripts/supervisor-entrypoint.ts", "--dev"], {
     cwd: serverDir,
-    env: {
-      ...process.env,
-      PATH: `${args.fakeToolBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      PASEO_HOME: args.paseoHome,
-      PASEO_E2E_EDITOR_RECORD_PATH: args.editorRecordPath,
-      PASEO_SERVER_ID: "srv_e2e_test_daemon",
-      PASEO_LISTEN: `0.0.0.0:${args.port}`,
-      PASEO_RELAY_ENDPOINT: `127.0.0.1:${args.relayPort}`,
-      PASEO_CORS_ORIGINS: `http://localhost:${args.metroPort}`,
-      PASEO_DICTATION_ENABLED: openAiUsable ? "1" : "0",
-      PASEO_VOICE_MODE_ENABLED: openAiUsable ? "1" : "0",
-      PASEO_NODE_ENV: "development",
-      ...(openAiUsable
-        ? {
-            PASEO_DICTATION_STT_PROVIDER: "openai",
-            PASEO_VOICE_STT_PROVIDER: "openai",
-            PASEO_VOICE_TTS_PROVIDER: "openai",
-          }
-        : {}),
-      ...(localModelsDir ? { PASEO_LOCAL_MODELS_DIR: localModelsDir } : {}),
-      NODE_ENV: "development",
-    },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
@@ -695,24 +714,34 @@ function startDaemon(args: DaemonSpawnArgs): ChildProcess {
   return child;
 }
 
+async function removeTempTree(targetPath: string): Promise<void> {
+  await rm(targetPath, {
+    recursive: true,
+    force: true,
+    maxRetries: 40,
+    retryDelay: 250,
+  });
+}
+
 async function performCleanup(shouldRemovePaseoHome: boolean): Promise<void> {
   await Promise.all([
     stopProcess(daemonProcess),
     stopProcess(metroProcess),
     stopProcess(relayProcess),
   ]);
+  await stopCurrentDaemonFromPidLock();
   daemonProcess = null;
   metroProcess = null;
   relayProcess = null;
   if (paseoHome && shouldRemovePaseoHome) {
-    await rm(paseoHome, { recursive: true, force: true });
+    await removeTempTree(paseoHome);
     paseoHome = null;
   } else if (paseoHome) {
     console.log(`[e2e] Preserving PASEO_HOME: ${paseoHome}`);
   }
-  if (fakeToolBinDir) {
-    await rm(fakeToolBinDir, { recursive: true, force: true });
-    fakeToolBinDir = null;
+  if (fakeEditorBinDir) {
+    await removeTempTree(fakeEditorBinDir);
+    fakeEditorBinDir = null;
   }
 }
 
@@ -721,13 +750,13 @@ export default async function globalSetup() {
   ensureRelayBuildArtifact(repoRoot);
   await loadEnvTestFile(repoRoot);
 
-  const port = await getAvailablePort();
-  const metroPort = await getAvailablePort();
+  const port = await getAvailablePortExcluding(new Set());
+  const metroPort = await getAvailablePortExcluding(new Set([port]));
   const requestedPaseoHome = resolveOptionalPaseoHomeEnv(process.env.E2E_PASEO_HOME);
   const shouldRemovePaseoHome = !requestedPaseoHome && process.env.E2E_KEEP_PASEO_HOME !== "1";
   paseoHome = requestedPaseoHome ?? (await mkdtemp(path.join(tmpdir(), "paseo-e2e-home-")));
   const editorRecordPath = path.join(paseoHome, "editor-open-records.jsonl");
-  fakeToolBinDir = await createFakeToolBin();
+  fakeEditorBinDir = await createFakeEditorBin();
   const metroLineBuffer = createLineBuffer();
   const daemonLineBuffer = createLineBuffer();
 
@@ -735,19 +764,22 @@ export default async function globalSetup() {
 
   const cleanup = () => performCleanup(shouldRemovePaseoHome);
 
-  const dictation = await resolveDictationConfig();
+  await logSpeechHarnessConfig();
 
   try {
     const relayPort = await startRelay(new Set([port, metroPort]));
-    metroProcess = startMetro(metroPort, metroLineBuffer);
+    metroProcess = startMetro({
+      metroPort,
+      daemonPort: port,
+      buffer: metroLineBuffer,
+    });
     daemonProcess = startDaemon({
       port,
       relayPort,
       metroPort,
       paseoHome,
-      fakeToolBinDir,
+      fakeEditorBinDir,
       editorRecordPath,
-      dictation,
       buffer: daemonLineBuffer,
     });
 
@@ -765,9 +797,8 @@ export default async function globalSetup() {
       }),
     ]);
 
-    const offer = await waitForPairingOfferFromCli({
-      repoRoot,
-      paseoHome,
+    const offer = await waitForPairingOfferFromDaemon({
+      port,
     });
 
     process.env.E2E_DAEMON_PORT = String(port);

@@ -1,10 +1,12 @@
 import { EventEmitter } from "node:events";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_DESKTOP_SETTINGS } from "../settings/desktop-settings";
 import { createDaemonCommandHandlers } from "./daemon-manager";
 
 const mocks = vi.hoisted(() => ({
+  paseoHome: "/tmp/paseo-desktop-daemon-manager-test-home",
   settings: {
     releaseChannel: "stable",
     daemon: {
@@ -15,24 +17,36 @@ const mocks = vi.hoisted(() => ({
   runExternalCliJsonCommand: vi.fn(),
   runExternalCliTextCommand: vi.fn(),
   spawnProcess: vi.fn(),
+  logInfo: vi.fn(),
+  logError: vi.fn(),
+  appLogPath: "/tmp/paseo-desktop-daemon-manager-test-main.log",
+  getElectronLogFile: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   app: {
     getPath: vi.fn(() => "/tmp/paseo-user-data"),
     getVersion: vi.fn(() => "1.2.3"),
-    isPackaged: false,
+    isPackaged: true,
   },
   ipcMain: { handle: vi.fn() },
   powerMonitor: { getSystemIdleTime: vi.fn(() => 0) },
 }));
 
 vi.mock("electron-log/main", () => ({
-  default: { info: vi.fn(), error: vi.fn() },
+  default: {
+    info: mocks.logInfo,
+    error: mocks.logError,
+    transports: {
+      file: {
+        getFile: mocks.getElectronLogFile,
+      },
+    },
+  },
 }));
 
 vi.mock("@getpaseo/server", () => ({
-  resolvePaseoHome: vi.fn(() => "/tmp/paseo-home"),
+  resolvePaseoHome: vi.fn(() => mocks.paseoHome),
   spawnProcess: mocks.spawnProcess,
 }));
 
@@ -72,8 +86,6 @@ function desktopSettingsWithManagement(enabled: boolean) {
 }
 
 type MockChildProcess = EventEmitter & {
-  stdout: EventEmitter;
-  stderr: EventEmitter;
   pid: number;
   spawnfile: string;
   spawnargs: string[];
@@ -82,8 +94,6 @@ type MockChildProcess = EventEmitter & {
 
 function createMockChildProcess(): MockChildProcess {
   const child = new EventEmitter() as MockChildProcess;
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
   child.pid = 1234;
   child.spawnfile = "node";
   child.spawnargs = ["node", "daemon.js"];
@@ -91,10 +101,8 @@ function createMockChildProcess(): MockChildProcess {
   return child;
 }
 
-function scheduleFailedStartupOutput(child: MockChildProcess): void {
+function scheduleFailedStartup(child: MockChildProcess): void {
   setImmediate(() => {
-    child.stdout.emit("data", Buffer.from(`${"x".repeat(80_000)}stdout-tail`));
-    child.stderr.emit("data", Buffer.from(`${"y".repeat(80_000)}stderr-tail`));
     child.emit("exit", 1, null);
   });
 }
@@ -105,6 +113,17 @@ describe("daemon-manager commands", () => {
     mocks.runExternalCliJsonCommand.mockReset();
     mocks.runExternalCliTextCommand.mockReset();
     mocks.spawnProcess.mockReset();
+    mocks.logInfo.mockReset();
+    mocks.logError.mockReset();
+    mocks.getElectronLogFile.mockReset();
+    mocks.getElectronLogFile.mockReturnValue({ path: mocks.appLogPath });
+    rmSync(mocks.paseoHome, { recursive: true, force: true });
+    rmSync(mocks.appLogPath, { force: true });
+  });
+
+  afterEach(() => {
+    rmSync(mocks.paseoHome, { recursive: true, force: true });
+    rmSync(mocks.appLogPath, { force: true });
   });
 
   it("refuses start and restart while built-in daemon management is disabled", async () => {
@@ -136,7 +155,7 @@ describe("daemon-manager commands", () => {
       listen: null,
       hostname: null,
       pid: null,
-      home: "/tmp/paseo-home",
+      home: mocks.paseoHome,
       version: null,
       desktopManaged: false,
       error: null,
@@ -167,7 +186,7 @@ describe("daemon-manager commands", () => {
       listen: null,
       hostname: null,
       pid: null,
-      home: "/tmp/paseo-home",
+      home: mocks.paseoHome,
       version: null,
       desktopManaged: false,
       error: null,
@@ -193,9 +212,110 @@ describe("daemon-manager commands", () => {
       "status",
       "--json",
     ]);
+    expect(mocks.logInfo).toHaveBeenCalledWith(
+      "[desktop daemon]",
+      "desktop daemon stop requested",
+      expect.objectContaining({
+        reason: "manual_ipc",
+        statusBefore: expect.objectContaining({
+          status: "running",
+          pid: 4242,
+          serverId: "server-1",
+          desktopManaged: true,
+        }),
+      }),
+    );
+    expect(mocks.logInfo).toHaveBeenCalledWith(
+      "[desktop daemon]",
+      "desktop daemon stop completed",
+      expect.objectContaining({
+        reason: "manual_ipc",
+        cliResult: { action: "stopped" },
+        statusAfter: expect.objectContaining({
+          status: "stopped",
+          serverId: null,
+        }),
+      }),
+    );
   });
 
-  it("uses a reachable daemon when the PID file is stale", async () => {
+  it("routes stale reachable desktop daemon stops through external CLI daemon stop", async () => {
+    mocks.runExternalCliJsonCommand
+      .mockResolvedValueOnce({
+        localDaemon: "stale_pid",
+        connectedDaemon: "reachable",
+        serverId: "server-1",
+        pid: 7675,
+        listen: "127.0.0.1:6767",
+        daemonVersion: "1.2.2",
+        desktopManaged: true,
+      })
+      .mockResolvedValueOnce({ action: "stopped" })
+      .mockResolvedValueOnce({
+        localDaemon: "stopped",
+        connectedDaemon: "unreachable",
+        serverId: "",
+      });
+    const handlers = createDaemonCommandHandlers();
+
+    await expect(handlers.stop_desktop_daemon()).resolves.toEqual({
+      serverId: "",
+      status: "stopped",
+      listen: null,
+      hostname: null,
+      pid: null,
+      home: mocks.paseoHome,
+      version: null,
+      desktopManaged: false,
+      error: null,
+    });
+
+    expect(mocks.runExternalCliJsonCommand).toHaveBeenNthCalledWith(2, [
+      "daemon",
+      "stop",
+      "--json",
+      "--timeout",
+      "5",
+      "--force",
+      "--kill-timeout",
+      "5",
+    ]);
+  });
+
+  it("records the renderer stop reason when stopping the desktop daemon", async () => {
+    mocks.runExternalCliJsonCommand
+      .mockResolvedValueOnce({
+        localDaemon: "running",
+        serverId: "server-1",
+        pid: 4242,
+        listen: "127.0.0.1:6767",
+        desktopManaged: true,
+      })
+      .mockResolvedValueOnce({ action: "stopped", reason: "lifecycle_shutdown_rpc" })
+      .mockResolvedValueOnce({
+        localDaemon: "stopped",
+        serverId: "",
+      });
+    const handlers = createDaemonCommandHandlers();
+
+    await handlers.stop_desktop_daemon({ reason: "host_remove" });
+
+    expect(mocks.logInfo).toHaveBeenCalledWith(
+      "[desktop daemon]",
+      "desktop daemon stop requested",
+      expect.objectContaining({ reason: "host_remove" }),
+    );
+    expect(mocks.logInfo).toHaveBeenCalledWith(
+      "[desktop daemon]",
+      "desktop daemon stop completed",
+      expect.objectContaining({
+        reason: "host_remove",
+        cliResult: { action: "stopped", reason: "lifecycle_shutdown_rpc" },
+      }),
+    );
+  });
+
+  it("uses a stale reachable desktop daemon when the version matches", async () => {
     mocks.runExternalCliJsonCommand.mockResolvedValue({
       localDaemon: "stale_pid",
       connectedDaemon: "reachable",
@@ -203,7 +323,7 @@ describe("daemon-manager commands", () => {
       pid: 7675,
       listen: "127.0.0.1:6767",
       hostname: "dev-host",
-      daemonVersion: "1.2.2",
+      daemonVersion: "1.2.3",
       desktopManaged: true,
     });
     const handlers = createDaemonCommandHandlers();
@@ -214,16 +334,86 @@ describe("daemon-manager commands", () => {
       listen: "127.0.0.1:6767",
       hostname: "dev-host",
       pid: null,
-      home: "/tmp/paseo-home",
-      version: "1.2.2",
-      desktopManaged: false,
+      home: mocks.paseoHome,
+      version: "1.2.3",
+      desktopManaged: true,
       error: null,
     });
 
     expect(mocks.spawnProcess).not.toHaveBeenCalled();
   });
 
-  it("bounds captured daemon startup output", async () => {
+  it("restarts a stale reachable desktop daemon when the version differs", async () => {
+    mocks.runExternalCliJsonCommand
+      .mockResolvedValueOnce({
+        localDaemon: "stale_pid",
+        connectedDaemon: "reachable",
+        serverId: "server-1",
+        pid: 7675,
+        listen: "127.0.0.1:6767",
+        hostname: "dev-host",
+        daemonVersion: "1.2.2",
+        desktopManaged: true,
+      })
+      .mockResolvedValueOnce({
+        localDaemon: "stale_pid",
+        connectedDaemon: "reachable",
+        serverId: "server-1",
+        pid: 7675,
+        listen: "127.0.0.1:6767",
+        daemonVersion: "1.2.2",
+        desktopManaged: true,
+      })
+      .mockResolvedValueOnce({ action: "stopped" })
+      .mockResolvedValueOnce({
+        localDaemon: "stopped",
+        connectedDaemon: "unreachable",
+        serverId: "",
+      })
+      .mockResolvedValueOnce({
+        localDaemon: "running",
+        connectedDaemon: "reachable",
+        serverId: "server-2",
+        pid: 8888,
+        listen: "127.0.0.1:6767",
+        hostname: "dev-host",
+        daemonVersion: "1.2.3",
+        desktopManaged: true,
+      });
+    mocks.spawnProcess.mockReturnValue(createMockChildProcess());
+    const handlers = createDaemonCommandHandlers();
+
+    await expect(handlers.start_desktop_daemon()).resolves.toEqual({
+      serverId: "server-2",
+      status: "running",
+      listen: "127.0.0.1:6767",
+      hostname: "dev-host",
+      pid: 8888,
+      home: mocks.paseoHome,
+      version: "1.2.3",
+      desktopManaged: true,
+      error: null,
+    });
+
+    expect(mocks.runExternalCliJsonCommand).toHaveBeenNthCalledWith(3, [
+      "daemon",
+      "stop",
+      "--json",
+      "--timeout",
+      "5",
+      "--force",
+      "--kill-timeout",
+      "5",
+    ]);
+    expect(mocks.spawnProcess).toHaveBeenCalled();
+  });
+
+  it("starts the managed daemon detached from desktop stdio and reports daemon log failures", async () => {
+    mkdirSync(mocks.paseoHome, { recursive: true });
+    writeFileSync(
+      `${mocks.paseoHome}/daemon.log`,
+      ["old log line", "recent daemon failure"].join("\n"),
+    );
     mocks.runExternalCliJsonCommand.mockResolvedValue({
       localDaemon: "stopped",
       connectedDaemon: "unreachable",
@@ -231,7 +421,7 @@ describe("daemon-manager commands", () => {
     });
     mocks.spawnProcess.mockImplementation(() => {
       const child = createMockChildProcess();
-      scheduleFailedStartupOutput(child);
+      scheduleFailedStartup(child);
       return child;
     });
     const handlers = createDaemonCommandHandlers();
@@ -245,10 +435,33 @@ describe("daemon-manager commands", () => {
 
     expect(thrown).toBeInstanceOf(Error);
     const message = thrown?.message ?? "";
+    const recentLogsLabel = message.match(/Recent logs \(([^)]*)\):/)?.[1];
     expect(message).toContain("Daemon failed to start: exit code 1");
-    expect(message).toContain("output truncated to the last 65536 chars");
-    expect(message).toContain("stdout-tail");
-    expect(message).toContain("stderr-tail");
-    expect(message.length).toBeLessThan(150_000);
+    expect(recentLogsLabel?.split(/[\\/]/).at(-1)).toBe("daemon.log");
+    expect(message).toContain("recent daemon failure");
+    expect(mocks.spawnProcess).toHaveBeenCalledWith(
+      "node",
+      [],
+      expect.objectContaining({
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore"],
+        envOverlay: expect.objectContaining({ PASEO_WEB_UI_ENABLED: "false" }),
+      }),
+    );
+  });
+
+  it("returns the Electron main-process log tail from electron-log", () => {
+    writeFileSync(
+      mocks.appLogPath,
+      Array.from({ length: 105 }, (_value, index) => `main log line ${index + 1}`).join("\n"),
+    );
+    const handlers = createDaemonCommandHandlers();
+
+    expect(handlers.desktop_app_logs()).toEqual({
+      logPath: mocks.appLogPath,
+      contents: Array.from({ length: 100 }, (_value, index) => `main log line ${index + 6}`).join(
+        "\n",
+      ),
+    });
   });
 });

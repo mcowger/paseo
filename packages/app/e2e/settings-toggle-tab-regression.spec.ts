@@ -54,10 +54,12 @@ test.describe("Settings toggle tab regression", () => {
     try {
       const firstAgent = await createIdleAgent(workspace.client, {
         cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         title: `settings-toggle-a-${Date.now()}`,
       });
       const secondAgent = await createIdleAgent(workspace.client, {
         cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         title: `settings-toggle-b-${Date.now()}`,
       });
 
@@ -74,7 +76,7 @@ test.describe("Settings toggle tab regression", () => {
       await expectSendBehavior(page, "interrupt");
 
       await pressSettingsToggleShortcut(page);
-      await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, workspace.repoPath));
+      await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, workspace.workspaceId));
       await waitForTabBar(page);
       await expectAgentTabActive(page, secondAgent.id);
 
@@ -95,23 +97,25 @@ test.describe("Settings toggle tab regression", () => {
     try {
       const firstAgent = await createIdleAgent(workspace.client, {
         cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         title: `agent-route-refresh-a-${Date.now()}`,
       });
       const secondAgent = await createIdleAgent(workspace.client, {
         cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         title: `agent-route-refresh-b-${Date.now()}`,
       });
 
       await openAgentRouteAndExpectFocused({
         page,
         serverId,
-        workspaceId: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         agentId: firstAgent.id,
       });
       await openAgentRouteAndExpectFocused({
         page,
         serverId,
-        workspaceId: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         agentId: secondAgent.id,
       });
 

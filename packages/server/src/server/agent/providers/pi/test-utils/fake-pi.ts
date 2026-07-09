@@ -51,6 +51,8 @@ export class FakePi implements PiRuntime {
 
 export class FakePiSession implements PiRuntimeSession {
   readonly prompts: Array<{ message: string; imageCount: number }> = [];
+  readonly compactRequests: Array<{ customInstructions?: string }> = [];
+  readonly setAutoCompactionRequests: boolean[] = [];
   readonly setModelRequests: Array<{ provider: string; modelId: string }> = [];
   readonly setThinkingLevelRequests: string[] = [];
   readonly treeNavigationRequests: string[] = [];
@@ -69,6 +71,8 @@ export class FakePiSession implements PiRuntimeSession {
     cost: 0,
   };
   commands: PiRpcSlashCommand[] = [];
+  compactError: Error | null = null;
+  emitCompactEnd = true;
   state: PiSessionState;
 
   private readonly subscribers = new Set<(event: PiRuntimeEvent) => void>();
@@ -79,6 +83,7 @@ export class FakePiSession implements PiRuntimeSession {
       thinkingLevel: "medium",
       isStreaming: false,
       isCompacting: false,
+      autoCompactionEnabled: true,
       sessionFile: launch.session ?? "/tmp/pi-session",
       sessionId: "pi-session-1",
       messageCount: 0,
@@ -102,6 +107,25 @@ export class FakePiSession implements PiRuntimeSession {
     this.handleEntryCaptureCommand(message);
   }
 
+  async compact(customInstructions?: string): Promise<void> {
+    this.compactRequests.push(customInstructions === undefined ? {} : { customInstructions });
+    this.emit({ type: "compaction_start", reason: "manual" });
+    if (this.emitCompactEnd) {
+      this.emit({ type: "compaction_end", reason: "manual" });
+    }
+    if (this.compactError) {
+      throw this.compactError;
+    }
+  }
+
+  async setAutoCompaction(enabled: boolean): Promise<void> {
+    this.setAutoCompactionRequests.push(enabled);
+    this.state = {
+      ...this.state,
+      autoCompactionEnabled: enabled,
+    };
+  }
+
   async abort(): Promise<void> {
     this.abortRequested = true;
   }
@@ -114,7 +138,7 @@ export class FakePiSession implements PiRuntimeSession {
     return this.messages;
   }
 
-  async getAvailableModels(): Promise<PiModel[]> {
+  async getAvailableModels(_timeoutMs?: number): Promise<PiModel[]> {
     return this.models;
   }
 

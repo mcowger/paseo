@@ -22,8 +22,11 @@ function discoverDocsRoutes(): string[] {
         continue;
       }
       if (!entry.name.endsWith(".md")) continue;
-      const rel = path.relative(docsDir, full).replace(/\.md$/, "");
-      if (rel === "index") continue;
+      const rel = path
+        .relative(docsDir, full)
+        .replace(/\.md$/, "")
+        .replace(/\/index$/, "");
+      if (rel === "index" || rel === "") continue;
       routes.add(`/docs/${rel.split(path.sep).join("/")}`);
     }
   };
@@ -42,6 +45,7 @@ function discoverAgentRoutes(): string[] {
     "docs",
     "download",
     "index",
+    "sponsor",
     "privacy",
   ]);
   return fs
@@ -51,6 +55,17 @@ function discoverAgentRoutes(): string[] {
     .filter((name) => !reserved.has(name))
     .sort()
     .map((slug) => `/${slug}`);
+}
+
+function discoverAlternativeRoutes(): string[] {
+  const alternativesDir = path.join(__dirname, "src/routes/alternatives");
+  if (!fs.existsSync(alternativesDir)) return [];
+  const slugs = fs
+    .readdirSync(alternativesDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".tsx"))
+    .map((entry) => entry.name.replace(/\.tsx$/, ""))
+    .sort();
+  return ["/alternatives", ...slugs.map((slug) => `/alternatives/${slug}`)];
 }
 
 function discoverBlogRoutes(): string[] {
@@ -72,6 +87,7 @@ const sitemapPages = [
   "/download",
   "/privacy",
   ...discoverAgentRoutes(),
+  ...discoverAlternativeRoutes(),
   ...discoverDocsRoutes(),
   ...discoverBlogRoutes(),
 ].map((routePath) => ({

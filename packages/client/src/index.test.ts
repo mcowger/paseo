@@ -199,6 +199,7 @@ test("createPaseoClient exposes workspace list through the daemon client", async
   await expect(listPromise).resolves.toEqual({
     requestId: request.requestId,
     entries: [],
+    emptyProjects: [],
     pageInfo: {
       nextCursor: null,
       prevCursor: null,
@@ -241,7 +242,6 @@ test("workspace handles keep identity and refresh snapshots through existing dri
   expect(parseSentSessionMessage(ws.sent.at(-1))).toMatchObject({
     type: "fetch_workspaces_request",
     requestId: "workspace-refetch-request",
-    filter: { idPrefix: "workspace_sdk" },
     page: { limit: 25 },
   });
 
@@ -629,20 +629,37 @@ test("provider actions delegate to existing provider RPCs and local snapshot upd
   });
 
   const snapshotUpdates: string[] = [];
+  const snapshotModelDefaults: Array<string | undefined> = [];
   const unsubscribe = client.providers.subscribe((update) => {
     snapshotUpdates.push(update.generatedAt);
+    snapshotModelDefaults.push(update.entries[0]?.models?.[0]?.defaultThinkingOptionId);
   });
   ws.message(
     sessionMessage({
       type: "providers_snapshot_update",
       payload: {
         cwd: "/repo/sdk",
-        entries: [{ provider: "codex", status: "ready", enabled: true }],
+        entries: [
+          {
+            provider: "codex",
+            status: "ready",
+            enabled: true,
+            models: [
+              {
+                provider: "codex",
+                id: "gpt-5.5",
+                label: "GPT-5.5",
+                thinkingOptions: [{ id: "high", label: "High", isDefault: true }],
+              },
+            ],
+          },
+        ],
         generatedAt: "2026-05-16T01:00:00.000Z",
       },
     }),
   );
   expect(snapshotUpdates).toEqual(["2026-05-16T01:00:00.000Z"]);
+  expect(snapshotModelDefaults).toEqual(["high"]);
 
   unsubscribe();
   await client.close();
@@ -674,8 +691,10 @@ test("config actions delegate to existing daemon config RPCs", async () => {
     config: {
       mcp: { injectIntoAgents: true },
       providers: {},
+      browserTools: { enabled: false },
       metadataGeneration: { providers: [] },
       autoArchiveAfterMerge: false,
+      enableTerminalAgentHooks: false,
       appendSystemPrompt: "",
     },
   });
@@ -727,8 +746,10 @@ test("config actions delegate to existing daemon config RPCs", async () => {
           enabled: false,
         },
       },
+      browserTools: { enabled: false },
       metadataGeneration: { providers: [] },
       autoArchiveAfterMerge: false,
+      enableTerminalAgentHooks: false,
       appendSystemPrompt: "",
     },
   });

@@ -94,9 +94,11 @@ describe("DaemonConfigStore", () => {
       paseoHome,
       {
         mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
         providers: {},
         metadataGeneration: { providers: [] },
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
       },
       undefined,
@@ -125,9 +127,11 @@ describe("DaemonConfigStore", () => {
       paseoHome,
       {
         mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
         providers: {},
         metadataGeneration: { providers: [] },
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
       },
       undefined,
@@ -141,6 +145,29 @@ describe("DaemonConfigStore", () => {
     expect(persisted.daemon?.appendSystemPrompt).toBe("Prefer terse replies.");
   });
 
+  test("patch persists browser tools opt-in into config.json", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        metadataGeneration: { providers: [] },
+        autoArchiveAfterMerge: false,
+        appendSystemPrompt: "",
+      },
+      undefined,
+    );
+
+    store.patch({ browserTools: { enabled: true } });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.daemon?.browserTools).toEqual({ enabled: true });
+  });
+
   test("patch persists provider additional models into config.json", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
@@ -149,9 +176,11 @@ describe("DaemonConfigStore", () => {
       paseoHome,
       {
         mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
         providers: {},
         metadataGeneration: { providers: [] },
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
       },
       undefined,
@@ -189,9 +218,11 @@ describe("DaemonConfigStore", () => {
       paseoHome,
       {
         mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
         providers: {},
         metadataGeneration: { providers: [] },
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
       },
       undefined,
@@ -205,7 +236,7 @@ describe("DaemonConfigStore", () => {
     expect(persisted.daemon?.appendSystemPrompt).toBe("Prefer terse replies.");
   });
 
-  test("patch persists metadata generation providers into config.json", () => {
+  test("patch persists enable terminal agent hooks into config.json", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
 
@@ -216,6 +247,31 @@ describe("DaemonConfigStore", () => {
         providers: {},
         metadataGeneration: { providers: [] },
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+      },
+      undefined,
+    );
+
+    store.patch({ enableTerminalAgentHooks: true });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.daemon?.enableTerminalAgentHooks).toBe(true);
+  });
+
+  test("patch persists metadata generation providers into config.json", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        metadataGeneration: { providers: [] },
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
       },
       undefined,
@@ -264,8 +320,10 @@ describe("DaemonConfigStore", () => {
       paseoHome,
       {
         mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
         providers: {},
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
         metadataGeneration: { providers: [{ provider: "claude", model: "haiku" }] },
       },
@@ -286,8 +344,10 @@ describe("DaemonConfigStore", () => {
       paseoHome,
       {
         mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
         providers: {},
         autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
         appendSystemPrompt: "",
         metadataGeneration: { providers: [] },
       },

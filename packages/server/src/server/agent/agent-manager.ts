@@ -5,7 +5,11 @@ import {
   AGENT_LIFECYCLE_STATUSES,
   type AgentLifecycleStatus,
 } from "@getpaseo/protocol/agent-lifecycle";
-import { isDelegatedAgent, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  getParentAgentIdFromLabels,
+  isDelegatedAgent,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
@@ -23,6 +27,7 @@ import {
   type AgentPermissionResponse,
   type AgentPermissionResult,
   type AgentPersistenceHandle,
+  type AgentProviderNotice,
   type AgentPromptInput,
   type AgentProvider,
   type AgentRunOptions,
@@ -33,8 +38,9 @@ import {
   type AgentTimelineItem,
   type AgentUsage,
   type AgentRuntimeInfo,
-  type ListPersistedAgentsOptions,
-  type PersistedAgentDescriptor,
+  type ImportedTimelineEntry,
+  type ImportableProviderSession,
+  type ListImportableSessionsOptions,
 } from "./agent-sdk-types.js";
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
 import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
@@ -54,9 +60,11 @@ import {
 } from "./agent-stream-coalescer.js";
 import { ForegroundRunState, type ForegroundTurnWaiter } from "./foreground-run-state.js";
 import { getAgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
-import { IMPORTABLE_PROVIDERS } from "./provider-registry.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
+import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import { resolveCreateAgentTitles } from "./create-agent-title.js";
+import type { PaseoToolCatalogFactory } from "./tools/types.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -73,6 +81,15 @@ const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
 };
 
 type TimeoutResult = "completed" | "timed_out";
+
+interface PreparedSessionConfig {
+  storedConfig: AgentSessionConfig;
+  launchConfig: AgentSessionConfig;
+}
+
+interface NormalizeConfigOptions {
+  resolveDefaultModel?: boolean;
+}
 
 interface TimeoutOptions {
   operation: Promise<void>;
@@ -105,7 +122,7 @@ function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
     config.systemPrompt = record.config.systemPrompt;
   }
   if (record.config.mcpServers != null) config.mcpServers = record.config.mcpServers;
-  return config;
+  return stripInternalPaseoMcpServer(config);
 }
 
 export { AGENT_LIFECYCLE_STATUSES, type AgentLifecycleStatus };
@@ -141,13 +158,17 @@ interface HydrateTimelineOptions {
   broadcast?: boolean;
 }
 
-export type ImportablePersistedAgentQueryOptions = ListPersistedAgentsOptions & {
+export type ImportablePersistedAgentQueryOptions = ListImportableSessionsOptions & {
   /**
    * When set, only providers in this set are scanned, in addition to the
    * built-in importable allowlist + enabled + non-derived rules.
    */
   providerFilter?: Set<string>;
 };
+
+export interface ManagedImportableProviderSession extends ImportableProviderSession {
+  provider: AgentProvider;
+}
 
 export type AgentAttentionCallback = (params: {
   agentId: string;
@@ -175,15 +196,29 @@ interface ProviderEnabledFlag {
 type ProviderEnabledMap = Partial<Record<AgentProvider, ProviderEnabledFlag>>;
 type ProviderClientMap = Partial<Record<AgentProvider, AgentClient>>;
 
+export interface CreateAgentOptions {
+  labels?: Record<string, string>;
+  initialPrompt?: string;
+  env?: Record<string, string>;
+  persistSession?: boolean;
+  initialTitle?: string | null;
+  // undefined is an explicit decision: the agent never appears in the sidebar.
+  workspaceId: string | undefined;
+}
+
 export interface AgentManagerOptions {
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
+  onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
   durableTimelineStore?: AgentTimelineStore;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
+  mcpAuthToken?: string;
+  paseoToolsEnabled?: boolean;
+  paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   appendSystemPrompt?: string;
   agentStreamCoalesceWindowMs?: number;
   rescueTimeouts?: AgentManagerRescueTimeouts;
@@ -237,6 +272,12 @@ interface ManagedAgentBase {
   id: string;
   provider: AgentProvider;
   cwd: string;
+  /**
+   * Workspace this agent belongs to, stamped at creation. Independent of cwd:
+   * cwd answers "where does it run", workspaceId answers "which workspace owns it".
+   * Null/undefined for legacy agents created before ownership stamping.
+   */
+  workspaceId?: string;
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
@@ -326,6 +367,17 @@ type ActiveManagedAgent =
   | ManagedAgentError;
 
 type LiveManagedAgent = ActiveManagedAgent;
+type AgentLabelPatch = Record<string, string | null>;
+
+interface WriteLabelsResult {
+  record: StoredAgentRecord | null;
+  live: boolean;
+}
+
+interface AgentMetadataPatch {
+  title?: string;
+  labels?: AgentLabelPatch;
+}
 
 const SYSTEM_ERROR_PREFIX = "[System Error]";
 
@@ -351,7 +403,7 @@ interface SubscriptionRecord {
 }
 
 const BUSY_STATUSES: Set<AgentLifecycleStatus> = new Set(["initializing", "running"]);
-const AgentIdSchema = z.string().uuid();
+const AgentIdSchema = z.guid();
 
 function isAgentBusy(status: AgentLifecycleStatus): boolean {
   return BUSY_STATUSES.has(status);
@@ -384,6 +436,21 @@ function validateAgentId(agentId: string, source: string): string {
   return result.data;
 }
 
+function applyLabelPatch(
+  labels: Record<string, string>,
+  patch: AgentLabelPatch,
+): Record<string, string> {
+  const nextLabels = { ...labels };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete nextLabels[key];
+    } else {
+      nextLabels[key] = value;
+    }
+  }
+  return nextLabels;
+}
+
 function buildExplicitTimelineSeedForRegister(
   now: Date,
   options:
@@ -410,10 +477,53 @@ function buildExplicitTimelineSeedForRegister(
   };
 }
 
+function buildImportedTimelineRows(entries: readonly ImportedTimelineEntry[]): AgentTimelineRow[] {
+  const rows: AgentTimelineRow[] = [];
+  for (const entry of entries) {
+    if (entry.item.type === "user_message" && isSystemInjectedEnvelope(entry.item.text)) {
+      continue;
+    }
+    rows.push({
+      seq: rows.length + 1,
+      timestamp: entry.timestamp ?? new Date().toISOString(),
+      item: entry.item,
+    });
+  }
+  return rows;
+}
+
+function resolveImportedAgentTitle(
+  config: AgentSessionConfig,
+  timelineRows: readonly AgentTimelineRow[],
+): string | null {
+  const initialPrompt = getFirstUserMessageTextFromRows(timelineRows);
+  if (!initialPrompt) {
+    return null;
+  }
+  const { explicitTitle, provisionalTitle } = resolveCreateAgentTitles({
+    configTitle: config.title,
+    initialPrompt,
+  });
+  return explicitTitle ?? provisionalTitle ?? null;
+}
+
+function getFirstUserMessageTextFromRows(rows: readonly AgentTimelineRow[]): string | null {
+  for (const row of rows) {
+    const item = row.item;
+    if (item.type !== "user_message") {
+      continue;
+    }
+    const text = item.text.trim();
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
 export class AgentManager {
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
-  private readonly providerDerivedFromId = new Map<AgentProvider, string | null>();
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
@@ -427,9 +537,13 @@ export class AgentManager {
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
+  private readonly mcpAuthToken: string | null;
+  private paseoToolsEnabled = true;
+  private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private appendSystemPrompt: string;
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentArchived?: AgentArchivedCallback;
+  private onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
 
@@ -438,7 +552,10 @@ export class AgentManager {
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
+    this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
+    this.mcpAuthToken = options?.mcpAuthToken ?? null;
+    this.configurePaseoTools(options);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     this.rescueTimeouts = {
@@ -461,6 +578,11 @@ export class AgentManager {
     });
   }
 
+  private configurePaseoTools(options: AgentManagerOptions): void {
+    this.paseoToolsEnabled = options.paseoToolsEnabled ?? true;
+    this.paseoToolCatalogFactory = options.paseoToolCatalogFactory ?? null;
+  }
+
   registerClient(provider: AgentProvider, client: AgentClient): void {
     this.clients.set(provider, client);
   }
@@ -472,7 +594,6 @@ export class AgentManager {
     for (const [provider, definition] of Object.entries(input.providerDefinitions)) {
       if (definition) {
         this.providerEnabled.set(provider, definition.enabled);
-        this.providerDerivedFromId.set(provider, definition.derivedFromProviderId ?? null);
       }
     }
     for (const [provider, client] of Object.entries(input.clients)) {
@@ -496,6 +617,24 @@ export class AgentManager {
 
   setMcpBaseUrl(url: string | null): void {
     this.mcpBaseUrl = url;
+  }
+
+  setPaseoToolsEnabled(enabled: boolean): void {
+    this.paseoToolsEnabled = enabled;
+  }
+
+  setPaseoToolCatalogFactory(factory: PaseoToolCatalogFactory | null): void {
+    this.paseoToolCatalogFactory = factory;
+  }
+
+  /**
+   * Capability token the daemon's own MCP clients must present to the Agent MCP
+   * endpoint when a daemon password is configured. Read by the per-client
+   * session to authenticate its own MCP connection. Stays in the daemon — never
+   * sent to remote clients.
+   */
+  getMcpAuthToken(): string | null {
+    return this.mcpAuthToken;
   }
 
   setAppendSystemPrompt(prompt: string | null | undefined): void {
@@ -609,34 +748,37 @@ export class AgentManager {
       .map((agent) => Object.assign({}, agent));
   }
 
-  async listImportablePersistedAgents(
+  async listImportableSessions(
     options?: ImportablePersistedAgentQueryOptions,
-  ): Promise<PersistedAgentDescriptor[]> {
+  ): Promise<ManagedImportableProviderSession[]> {
     const providerEntries = Array.from(this.clients.entries()).filter(
       ([provider, client]) =>
-        !!client.listPersistedAgents &&
+        client.capabilities.supportsSessionListing &&
+        !!client.listImportableSessions &&
         this.isProviderImportable(provider, options?.providerFilter),
     );
-    const descriptorLists = await Promise.all(
+    const sessionLists = await Promise.all(
       providerEntries.map(async ([provider, client]) => {
         try {
-          return await client.listPersistedAgents!({
-            limit: options?.limit,
-            cwd: options?.cwd,
-          });
+          return (
+            await client.listImportableSessions!({
+              limit: options?.limit,
+              cwd: options?.cwd,
+            })
+          ).map((session) => Object.assign(session, { provider }));
         } catch (error) {
           this.logger.warn(
             { err: error, provider },
-            "Failed to list persisted agents for provider",
+            "Failed to list importable sessions for provider",
           );
           return [];
         }
       }),
     );
-    const descriptors: PersistedAgentDescriptor[] = descriptorLists.flat();
+    const sessions: ManagedImportableProviderSession[] = sessionLists.flat();
 
     const limit = options?.limit ?? 20;
-    return descriptors
+    return sessions
       .sort((a, b) => b.lastActivityAt.getTime() - a.lastActivityAt.getTime())
       .slice(0, limit);
   }
@@ -645,13 +787,7 @@ export class AgentManager {
     provider: AgentProvider,
     providerFilter: Set<string> | undefined,
   ): boolean {
-    if (!IMPORTABLE_PROVIDERS.includes(provider as (typeof IMPORTABLE_PROVIDERS)[number])) {
-      return false;
-    }
     if (this.providerEnabled.get(provider) === false) {
-      return false;
-    }
-    if (this.providerDerivedFromId.get(provider) != null) {
       return false;
     }
     if (providerFilter && !providerFilter.has(provider)) {
@@ -660,61 +796,46 @@ export class AgentManager {
     return true;
   }
 
-  async findPersistedAgent(
-    provider: AgentProvider,
-    sessionId: string,
-    options?: Pick<ListPersistedAgentsOptions, "cwd">,
-  ): Promise<PersistedAgentDescriptor | null> {
-    const client = this.requireClient(provider);
-    if (!client.listPersistedAgents) {
-      return null;
-    }
-
-    const descriptors = await client.listPersistedAgents({ limit: 200, cwd: options?.cwd });
-    return (
-      descriptors.find((descriptor) => {
-        return (
-          descriptor.sessionId === sessionId || descriptor.persistence.nativeHandle === sessionId
-        );
-      }) ?? null
+  async listProviderAvailability(): Promise<ProviderAvailability[]> {
+    return Promise.all(
+      Array.from(this.clients.keys()).map((provider) => this.getProviderAvailability(provider)),
     );
   }
 
-  async listProviderAvailability(): Promise<ProviderAvailability[]> {
-    const checks = Array.from(this.clients.keys()).map(async (provider) => {
-      const client = this.clients.get(provider);
-      if (!client) {
-        return {
-          provider,
-          available: false,
-          error: `No client registered for provider '${provider}'`,
-        } satisfies ProviderAvailability;
-      }
+  async getProviderAvailability(provider: AgentProvider): Promise<ProviderAvailability> {
+    const client = this.clients.get(provider);
+    if (!client) {
+      return {
+        provider,
+        available: false,
+        error: `No client registered for provider '${provider}'`,
+      };
+    }
 
-      try {
-        const available = await client.isAvailable();
-        return {
-          provider,
-          available,
-          error: null,
-        } satisfies ProviderAvailability;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn({ err: error, provider }, "Failed to check provider availability");
-        return {
-          provider,
-          available: false,
-          error: message,
-        } satisfies ProviderAvailability;
-      }
-    });
-
-    return Promise.all(checks);
+    try {
+      const available = await client.isAvailable();
+      return {
+        provider,
+        available,
+        error: null,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn({ err: error, provider }, "Failed to check provider availability");
+      return {
+        provider,
+        available: false,
+        error: message,
+      };
+    }
   }
 
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
-    const normalizedConfig = await this.normalizeConfig(config);
+    const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
     const client = this.requireClient(normalizedConfig.provider);
+    if (!normalizedConfig.model) {
+      return [];
+    }
     const available = await client.isAvailable();
     if (!available) {
       throw new Error(
@@ -747,8 +868,11 @@ export class AgentManager {
   }
 
   async listDraftFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
-    const normalizedConfig = await this.normalizeConfig(config);
+    const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
     const client = this.requireClient(normalizedConfig.provider);
+    if (!normalizedConfig.model) {
+      return [];
+    }
     const available = await client.isAvailable();
     if (!available) {
       throw new Error(
@@ -800,44 +924,23 @@ export class AgentManager {
 
   async createAgent(
     config: AgentSessionConfig,
-    agentId?: string,
-    options?: {
-      labels?: Record<string, string>;
-      workspaceId?: string;
-      initialPrompt?: string;
-      env?: Record<string, string>;
-      persistSession?: boolean;
-      initialTitle?: string | null;
-    },
+    agentId: string | undefined,
+    options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
-    const injectedConfig =
-      this.mcpBaseUrl == null
-        ? config
-        : {
-            ...config,
-            mcpServers: {
-              paseo: {
-                type: "http" as const,
-                url: `${this.mcpBaseUrl}?callerAgentId=${resolvedAgentId}`,
-              },
-              ...config.mcpServers,
-            },
-          };
-    this.requireEnabledProvider(injectedConfig.provider);
-    const normalizedConfig = this.applyDaemonAppendSystemPrompt(
-      await this.normalizeConfig(injectedConfig),
-    );
-    const launchContext = this.buildLaunchContext(resolvedAgentId, options?.env);
+    const { storedConfig, launchConfig } = await this.prepareSessionConfig(config, resolvedAgentId);
+    this.requireEnabledProvider(storedConfig.provider);
     const client = await this.requireAvailableClient({
-      provider: normalizedConfig.provider,
+      provider: storedConfig.provider,
     });
+    const launchContext = await this.buildLaunchContext(resolvedAgentId, client, options?.env);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
-    const session = await client.createSession(normalizedConfig, launchContext, createOptions);
-    return this.registerSession(session, normalizedConfig, resolvedAgentId, {
-      labels: options?.labels,
-      workspaceId: options?.workspaceId,
-      initialTitle: options?.initialTitle,
+    const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
+    return this.registerSession(session, storedConfig, resolvedAgentId, {
+      labels: options.labels,
+      initialTitle: options.initialTitle,
+      workspaceId: options.workspaceId,
     });
   }
 
@@ -860,6 +963,7 @@ export class AgentManager {
       updatedAt?: Date;
       lastUserMessageAt?: Date | null;
       labels?: Record<string, string>;
+      workspaceId?: string;
     },
   ): Promise<ManagedAgent> {
     const resolvedAgentId = validateAgentId(
@@ -872,28 +976,11 @@ export class AgentManager {
       ...overrides,
       provider: handle.provider,
     } as AgentSessionConfig;
-    const normalizedConfig = this.applyDaemonAppendSystemPrompt(
-      await this.normalizeConfig(mergedConfig),
+    const { storedConfig, launchConfig } = await this.prepareSessionConfig(
+      mergedConfig,
+      resolvedAgentId,
     );
-    const resumeOverrides: Partial<AgentSessionConfig> = { ...overrides };
-    let hasResumeOverrides = overrides !== undefined;
 
-    if (normalizedConfig.model !== mergedConfig.model) {
-      resumeOverrides.model = normalizedConfig.model;
-      hasResumeOverrides = true;
-    }
-
-    if (normalizedConfig.modeId !== mergedConfig.modeId) {
-      resumeOverrides.modeId = normalizedConfig.modeId;
-      hasResumeOverrides = true;
-    }
-
-    if (metadata.daemonAppendSystemPrompt !== normalizedConfig.daemonAppendSystemPrompt) {
-      resumeOverrides.daemonAppendSystemPrompt = normalizedConfig.daemonAppendSystemPrompt;
-      hasResumeOverrides = true;
-    }
-
-    const launchContext = this.buildLaunchContext(resolvedAgentId);
     const client = this.requireClient(handle.provider);
     const available = await client.isAvailable();
     if (!available) {
@@ -901,12 +988,57 @@ export class AgentManager {
         `Provider '${handle.provider}' is not available. Please ensure the CLI is installed.`,
       );
     }
-    const session = await client.resumeSession(
-      handle,
-      hasResumeOverrides ? resumeOverrides : undefined,
-      launchContext,
+    const launchContext = await this.buildLaunchContext(resolvedAgentId, client);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const session = await client.resumeSession(handle, providerLaunchConfig, launchContext);
+    return this.registerSession(session, storedConfig, resolvedAgentId, options);
+  }
+
+  async importProviderSession(input: {
+    provider: AgentProvider;
+    providerHandleId: string;
+    cwd: string;
+    workspaceId: string;
+    labels?: Record<string, string>;
+  }): Promise<ManagedAgent> {
+    const resolvedAgentId = validateAgentId(this.idFactory(), "importProviderSession");
+    this.requireEnabledProvider(input.provider);
+
+    const client = await this.requireAvailableClient({ provider: input.provider });
+    if (!client.importSession) {
+      throw new Error(`Provider '${input.provider}' does not support importing sessions`);
+    }
+
+    const { storedConfig, launchConfig } = await this.prepareSessionConfig(
+      {
+        provider: input.provider,
+        cwd: input.cwd,
+      },
+      resolvedAgentId,
     );
-    return this.registerSession(session, normalizedConfig, resolvedAgentId, options);
+    const launchContext = await this.buildLaunchContext(resolvedAgentId, client);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const imported = await client.importSession(
+      {
+        providerHandleId: input.providerHandleId,
+        cwd: input.cwd,
+      },
+      { config: providerLaunchConfig, storedConfig, launchContext },
+    );
+    const importedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(imported.config));
+    const timelineRows = buildImportedTimelineRows(imported.timeline);
+    const initialTitle = resolveImportedAgentTitle(importedConfig, timelineRows);
+
+    return this.registerSession(imported.session, importedConfig, resolvedAgentId, {
+      labels: input.labels,
+      workspaceId: input.workspaceId,
+      timelineRows,
+      timelineNextSeq: timelineRows.length + 1,
+      persistence: imported.persistence,
+      historyPrimed: true,
+      initialTitle,
+      publishWhenReady: true,
+    });
   }
 
   // Hot-reload an active agent session with config overrides. By default the
@@ -938,14 +1070,13 @@ export class AgentManager {
       ...overrides,
       provider,
     } as AgentSessionConfig;
-    const normalizedConfig = this.applyDaemonAppendSystemPrompt(
-      await this.normalizeConfig(refreshConfig),
-    );
-    const launchContext = this.buildLaunchContext(agentId);
+    const { storedConfig, launchConfig } = await this.prepareSessionConfig(refreshConfig, agentId);
+    const launchContext = await this.buildLaunchContext(agentId, client);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
 
     const session = handle
-      ? await client.resumeSession(handle, normalizedConfig, launchContext)
-      : await client.createSession(normalizedConfig, launchContext);
+      ? await client.resumeSession(handle, providerLaunchConfig, launchContext)
+      : await client.createSession(providerLaunchConfig, launchContext);
 
     this.agentStreamCoalescer.flushAndDiscard(agentId);
     // Remove the existing agent entry before swapping sessions
@@ -966,8 +1097,9 @@ export class AgentManager {
     }
 
     // Preserve existing labels and timeline during reload.
-    return this.registerSession(session, normalizedConfig, agentId, {
+    return this.registerSession(session, storedConfig, agentId, {
       labels: existing.labels,
+      workspaceId: existing.workspaceId,
       createdAt: existing.createdAt,
       updatedAt: existing.updatedAt,
       lastUserMessageAt: existing.lastUserMessageAt,
@@ -1086,9 +1218,8 @@ export class AgentManager {
 
   // Children created via the MCP `create_agent` tool carry the parent-agent-id
   // label pointing back at the caller. Archiving the parent cascades to those
-  // children so subagent fleets don't outlive their orchestrator. Handoff agents
-  // launched the same way are caught by this cascade — see docs/agent-lifecycle.md
-  // for the accepted limitation.
+  // children so subagent fleets don't outlive their orchestrator. Detached
+  // handoff agents omit this label, so they stand outside the cascade.
   private async cascadeArchiveChildren(parentAgentId: string): Promise<void> {
     const registry = this.registry;
     if (!registry) {
@@ -1151,6 +1282,7 @@ export class AgentManager {
         id: record.id,
         provider: record.provider,
         cwd: record.cwd,
+        workspaceId: record.workspaceId,
         session: null,
         capabilities: STORED_AGENT_CAPABILITIES,
         config: buildStoredAgentConfig(record),
@@ -1181,9 +1313,9 @@ export class AgentManager {
     });
   }
 
-  async setAgentMode(agentId: string, modeId: string): Promise<void> {
+  async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
-    await agent.session.setMode(modeId);
+    const notice = (await agent.session.setMode(modeId)) ?? null;
     const currentMode = (await agent.session.getCurrentMode()) ?? modeId;
     agent.config.modeId = currentMode ?? undefined;
     agent.currentModeId = currentMode;
@@ -1193,6 +1325,7 @@ export class AgentManager {
     }
     this.touchUpdatedAt(agent);
     this.emitState(agent);
+    return notice;
   }
 
   async setAgentModel(agentId: string, modelId: string | null): Promise<void> {
@@ -1212,15 +1345,19 @@ export class AgentManager {
     this.emitState(agent);
   }
 
-  async setAgentThinkingOption(agentId: string, thinkingOptionId: string | null): Promise<void> {
+  async setAgentThinkingOption(
+    agentId: string,
+    thinkingOptionId: string | null,
+  ): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
     const normalizedThinkingOptionId =
       typeof thinkingOptionId === "string" && thinkingOptionId.trim().length > 0
         ? thinkingOptionId
         : null;
 
+    let notice: AgentProviderNotice | null = null;
     if (agent.session.setThinkingOption) {
-      await agent.session.setThinkingOption(normalizedThinkingOptionId);
+      notice = (await agent.session.setThinkingOption(normalizedThinkingOptionId)) ?? null;
     }
 
     agent.config.thinkingOptionId = normalizedThinkingOptionId ?? undefined;
@@ -1232,6 +1369,7 @@ export class AgentManager {
     }
     this.touchUpdatedAt(agent);
     this.emitState(agent);
+    return notice;
   }
 
   async setAgentFeature(agentId: string, featureId: string, value: unknown): Promise<void> {
@@ -1265,26 +1403,85 @@ export class AgentManager {
     this.emitState(agent, { persist: false });
   }
 
-  async setGeneratedTitle(agentId: string, title: string): Promise<void> {
-    const agent = this.requireAgent(agentId);
-    const normalizedTitle = title.trim();
-    if (!normalizedTitle) {
-      return;
-    }
-
-    const registry = this.requireRegistry();
-    const persisted = await registry.setGeneratedTitle(agent.id, normalizedTitle);
-
-    agent.updatedAt = new Date(persisted.updatedAt);
-    this.emitState(agent, { persist: false });
-  }
-
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
     const agent = this.requireAgent(agentId);
-    agent.labels = { ...agent.labels, ...labels };
-    this.touchUpdatedAt(agent);
-    await this.persistSnapshot(agent);
-    this.emitState(agent, { persist: false });
+    await this.writeLabels(agent.id, labels);
+  }
+
+  private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
+    const liveAgent = this.agents.get(agentId);
+    if (liveAgent) {
+      liveAgent.labels = applyLabelPatch(liveAgent.labels, patch);
+      this.touchUpdatedAt(liveAgent);
+      await this.persistSnapshot(liveAgent);
+      this.emitState(liveAgent, { persist: false });
+      const record = this.registry ? await this.registry.get(agentId) : null;
+      return { record, live: true };
+    }
+
+    const nextRecord = await this.writeStoredMetadata(agentId, { labels: patch });
+    return { record: nextRecord, live: false };
+  }
+
+  private async writeStoredMetadata(
+    agentId: string,
+    patch: AgentMetadataPatch,
+  ): Promise<StoredAgentRecord> {
+    const registry = this.requireRegistry();
+    const record = await registry.get(agentId);
+    if (!record) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    const nextRecord = {
+      ...record,
+      ...(patch.title ? { title: patch.title } : {}),
+      ...(patch.labels ? { labels: applyLabelPatch(record.labels, patch.labels) } : {}),
+      updatedAt: this.nextStoredUpdatedAt(record),
+    };
+    await registry.upsert(nextRecord);
+    return nextRecord;
+  }
+
+  async detachAgent(agentId: string): Promise<{
+    record: StoredAgentRecord;
+    live: boolean;
+    previousParentAgentId: string | null;
+  }> {
+    const registry = this.requireRegistry();
+    const liveAgent = this.agents.get(agentId);
+    if (liveAgent) {
+      const previousParentAgentId = getParentAgentIdFromLabels(liveAgent.labels);
+      if (!previousParentAgentId) {
+        await this.persistSnapshot(liveAgent);
+        const record = await registry.get(agentId);
+        if (!record) {
+          throw new Error(`Agent not found in storage after detach: ${agentId}`);
+        }
+        return { record, live: true, previousParentAgentId: null };
+      }
+
+      const { record } = await this.writeLabels(agentId, { [PARENT_AGENT_ID_LABEL]: null });
+      if (!record) {
+        throw new Error(`Agent not found in storage after detach: ${agentId}`);
+      }
+      return { record, live: true, previousParentAgentId };
+    }
+
+    const record = await registry.get(agentId);
+    if (!record) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    const previousParentAgentId = getParentAgentIdFromLabels(record.labels);
+    if (!previousParentAgentId) {
+      return { record, live: false, previousParentAgentId: null };
+    }
+
+    const result = await this.writeLabels(agentId, { [PARENT_AGENT_ID_LABEL]: null });
+    if (!result.record) {
+      throw new Error(`Agent not found in storage after detach: ${agentId}`);
+    }
+    return { record: result.record, live: false, previousParentAgentId };
   }
 
   notifyAgentState(agentId: string): void {
@@ -1342,9 +1539,12 @@ export class AgentManager {
       return false;
     }
 
+    await this.unarchiveNativeSession(record.provider, record.persistence);
+
     await registry.upsert({
       ...record,
       archivedAt: null,
+      updatedAt: new Date().toISOString(),
     });
 
     if (this.getAgent(agentId)) {
@@ -1381,23 +1581,12 @@ export class AgentManager {
         await this.setTitle(agentId, updates.title);
       }
       if (updates.labels) {
-        await this.setLabels(agentId, updates.labels);
+        await this.writeLabels(agentId, updates.labels);
       }
       return;
     }
 
-    const registry = this.requireRegistry();
-    const existing = await registry.get(agentId);
-    if (!existing) {
-      throw new Error(`Agent not found: ${agentId}`);
-    }
-
-    await registry.upsert({
-      ...existing,
-      ...(updates.title ? { title: updates.title } : {}),
-      ...(updates.labels ? { labels: { ...existing.labels, ...updates.labels } } : {}),
-      updatedAt: this.nextStoredUpdatedAt(existing),
-    });
+    await this.writeStoredMetadata(agentId, updates);
   }
 
   async runAgent(
@@ -2268,7 +2457,6 @@ export class AgentManager {
     config: AgentSessionConfig,
     agentId: string,
     options?: {
-      workspaceId?: string;
       createdAt?: Date;
       updatedAt?: Date;
       lastUserMessageAt?: Date | null;
@@ -2276,11 +2464,14 @@ export class AgentManager {
       timeline?: AgentTimelineItem[];
       timelineRows?: AgentTimelineRow[];
       timelineNextSeq?: number;
+      persistence?: AgentPersistenceHandle;
       historyPrimed?: boolean;
       lastUsage?: AgentUsage;
       lastError?: string;
       attention?: AttentionState;
       initialTitle?: string | null;
+      publishWhenReady?: boolean;
+      workspaceId?: string;
     },
   ): Promise<ManagedAgent> {
     const resolvedAgentId = validateAgentId(agentId, "registerSession");
@@ -2312,16 +2503,17 @@ export class AgentManager {
     this.agents.set(resolvedAgentId, managed);
     // Initialize previousStatus to track transitions
     this.previousStatuses.set(resolvedAgentId, managed.lifecycle);
-    await this.refreshRuntimeInfo(managed);
+    await this.refreshRuntimeInfo(managed, { emit: !options?.publishWhenReady });
     await this.persistSnapshot(managed, {
-      workspaceId: options?.workspaceId,
       title: initialPersistedTitle,
     });
-    this.emitState(managed, { persist: false });
+    if (!options?.publishWhenReady) {
+      this.emitState(managed, { persist: false });
+    }
 
-    await this.refreshSessionState(managed);
+    await this.refreshSessionState(managed, { emit: !options?.publishWhenReady });
     managed.lifecycle = "idle";
-    await this.persistSnapshot(managed, { workspaceId: options?.workspaceId });
+    await this.persistSnapshot(managed);
     this.emitState(managed, { persist: false });
     this.subscribeToSession(managed);
     return { ...managed };
@@ -2335,6 +2527,7 @@ export class AgentManager {
           timeline?: AgentTimelineItem[];
           timelineRows?: AgentTimelineRow[];
           timelineNextSeq?: number;
+          persistence?: AgentPersistenceHandle;
           createdAt?: Date;
           updatedAt?: Date;
         }
@@ -2377,6 +2570,8 @@ export class AgentManager {
           lastUsage?: AgentUsage;
           lastError?: string;
           attention?: AttentionState;
+          persistence?: AgentPersistenceHandle;
+          workspaceId?: string;
         }
       | undefined;
   }): ActiveManagedAgent {
@@ -2385,6 +2580,7 @@ export class AgentManager {
       id: resolvedAgentId,
       provider: config.provider,
       cwd: config.cwd,
+      workspaceId: options?.workspaceId,
       session,
       capabilities: session.capabilities,
       config,
@@ -2402,7 +2598,10 @@ export class AgentManager {
       foregroundTurnWaiters: new Set<ForegroundTurnWaiter>(),
       finalizedForegroundTurnIds: new Set<string>(),
       unsubscribeSession: null,
-      persistence: attachPersistenceCwd(session.describePersistence(), config.cwd),
+      persistence: attachPersistenceCwd(
+        options?.persistence ?? session.describePersistence(),
+        config.cwd,
+      ),
       historyPrimed: options?.historyPrimed ?? durableTimelineHasRows,
       lastUserMessageAt: options?.lastUserMessageAt ?? null,
       lastUsage: options?.lastUsage,
@@ -2577,17 +2776,13 @@ export class AgentManager {
 
   private async persistSnapshot(
     agent: ManagedAgent,
-    options?: { workspaceId?: string; title?: string | null; internal?: boolean },
+    options?: { title?: string | null; internal?: boolean },
   ): Promise<void> {
     if (!this.registry) {
       return;
     }
     // Don't persist internal agents - they're ephemeral system tasks
     if (agent.internal) {
-      return;
-    }
-    if (options?.workspaceId !== undefined) {
-      await this.registry.applySnapshot(agent, options.workspaceId, options);
       return;
     }
     await this.registry.applySnapshot(agent, options);
@@ -2600,7 +2795,10 @@ export class AgentManager {
     return this.registry;
   }
 
-  private async refreshSessionState(agent: ActiveManagedAgent): Promise<void> {
+  private async refreshSessionState(
+    agent: ActiveManagedAgent,
+    options?: { emit?: boolean },
+  ): Promise<void> {
     try {
       const modes = await agent.session.getAvailableModes();
       agent.availableModes = modes;
@@ -2622,10 +2820,13 @@ export class AgentManager {
     }
 
     this.syncFeaturesFromSession(agent);
-    await this.refreshRuntimeInfo(agent);
+    await this.refreshRuntimeInfo(agent, options);
   }
 
-  private async refreshRuntimeInfo(agent: ActiveManagedAgent): Promise<void> {
+  private async refreshRuntimeInfo(
+    agent: ActiveManagedAgent,
+    options?: { emit?: boolean },
+  ): Promise<void> {
     try {
       const newInfo = await agent.session.getRuntimeInfo();
       const changed =
@@ -2641,7 +2842,7 @@ export class AgentManager {
         );
       }
       // Emit state if runtimeInfo changed so clients get the updated model
-      if (changed) {
+      if (changed && options?.emit !== false) {
         this.emitState(agent);
       }
     } catch {
@@ -3163,6 +3364,19 @@ export class AgentManager {
       epoch: this.timelineStore.getEpoch(agentId),
       timestamp: row.timestamp,
     });
+
+    if (
+      item.type === "tool_call" &&
+      item.status === "completed" &&
+      item.detail?.type === "shell" &&
+      commandMayHaveChangedExternalState(item.detail.command)
+    ) {
+      const agent = this.agents.get(agentId);
+      if (agent) {
+        this.onWorkspaceStateMayHaveChanged?.({ cwd: agent.cwd });
+      }
+    }
+
     return event;
   }
 
@@ -3431,7 +3645,10 @@ export class AgentManager {
     }
   }
 
-  private async normalizeConfig(config: AgentSessionConfig): Promise<AgentSessionConfig> {
+  private async normalizeConfig(
+    config: AgentSessionConfig,
+    options: NormalizeConfigOptions = {},
+  ): Promise<AgentSessionConfig> {
     const normalized: AgentSessionConfig = { ...config };
 
     // Always resolve cwd to absolute path for consistent history file lookup
@@ -3462,18 +3679,11 @@ export class AgentManager {
       normalized.model = trimmed.length > 0 && trimmed !== "default" ? trimmed : undefined;
     }
 
-    if (!normalized.model) {
-      const client = this.clients.get(normalized.provider);
-      if (client) {
-        try {
-          const models = await client.listModels({ cwd: normalized.cwd, force: false });
-          const defaultModel = models.find((model) => model.isDefault) ?? models[0];
-          if (defaultModel) {
-            normalized.model = defaultModel.id;
-          }
-        } catch {
-          // Provider may not support model listing — leave model undefined
-        }
+    const shouldResolveDefaultModel = options.resolveDefaultModel ?? true;
+    if (shouldResolveDefaultModel && !normalized.model) {
+      const defaultModelId = await this.resolveDefaultModelId(normalized);
+      if (defaultModelId) {
+        normalized.model = defaultModelId;
       }
     }
 
@@ -3489,6 +3699,40 @@ export class AgentManager {
     return normalized;
   }
 
+  private async resolveDefaultModelId(config: AgentSessionConfig): Promise<string | undefined> {
+    const client = this.clients.get(config.provider);
+    if (!client) {
+      return undefined;
+    }
+    try {
+      const catalog = await client.fetchCatalog({
+        scope: "workspace",
+        cwd: config.cwd,
+        force: false,
+      });
+      return (catalog.models.find((model) => model.isDefault) ?? catalog.models[0])?.id;
+    } catch {
+      // Provider may not support model listing — leave model undefined.
+      return undefined;
+    }
+  }
+
+  private async prepareSessionConfig(
+    config: AgentSessionConfig,
+    agentId: string,
+  ): Promise<PreparedSessionConfig> {
+    const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config));
+    const launchConfig = this.applyDaemonAppendSystemPrompt(
+      withRuntimePaseoMcpServer({
+        config: storedConfig,
+        agentId,
+        mcpBaseUrl: this.mcpBaseUrl,
+        mcpAuthToken: this.mcpAuthToken,
+      }),
+    );
+    return { storedConfig, launchConfig };
+  }
+
   private applyDaemonAppendSystemPrompt(config: AgentSessionConfig): AgentSessionConfig {
     const daemonAppendSystemPrompt = this.appendSystemPrompt.trim();
     const next = { ...config };
@@ -3502,14 +3746,33 @@ export class AgentManager {
       : next;
   }
 
-  private buildLaunchContext(agentId: string, env?: Record<string, string>): AgentLaunchContext {
-    return {
+  private async buildLaunchContext(
+    agentId: string,
+    client: AgentClient,
+    env?: Record<string, string>,
+  ): Promise<AgentLaunchContext> {
+    const context: AgentLaunchContext = {
       agentId,
       env: {
         ...env,
         PASEO_AGENT_ID: agentId,
       },
     };
+    if (
+      this.paseoToolsEnabled &&
+      client.capabilities.supportsNativePaseoTools &&
+      this.paseoToolCatalogFactory
+    ) {
+      context.paseoTools = await this.paseoToolCatalogFactory({ callerAgentId: agentId });
+    }
+    return context;
+  }
+
+  private resolveProviderLaunchConfig(
+    launchConfig: AgentSessionConfig,
+    launchContext: AgentLaunchContext,
+  ): AgentSessionConfig {
+    return launchContext.paseoTools ? stripInternalPaseoMcpServer(launchConfig) : launchConfig;
   }
 
   private async requireAvailableClient(options: { provider: AgentProvider }): Promise<AgentClient> {
@@ -3578,6 +3841,16 @@ export class AgentManager {
     }
   }
 
+  private async unarchiveNativeSession(
+    provider: AgentProvider,
+    persistence: AgentPersistenceHandle | null | undefined,
+  ): Promise<void> {
+    if (!persistence) return;
+    const client = this.clients.get(provider);
+    if (!client?.unarchiveNativeSession) return;
+    await client.unarchiveNativeSession(persistence);
+  }
+
   private requireAgent(id: string): LiveManagedAgent {
     const normalizedId = validateAgentId(id, "requireAgent");
     const agent = this.agents.get(normalizedId);
@@ -3594,4 +3867,21 @@ export class AgentManager {
     }
     return agent;
   }
+}
+
+export function commandMayHaveChangedExternalState(command: string): boolean {
+  const normalized = command.toLowerCase();
+  // Commands that operate on remote state and do NOT trigger local file
+  // watchers. Local git mutations (commit, checkout, merge, rebase, reset,
+  // pull) are already caught by watchers on .git/HEAD and refs/heads/.
+  return (
+    // GitHub PR operations (merge, close, create, edit, comment, review)
+    /\bgh\s+pr\s+(merge|close|create|edit|comment|review)\b/.test(normalized) ||
+    // Pushes to remote — local refs unchanged, but remote state (PR checks,
+    // mergeable status) may shift immediately after.
+    /\bgit\s+push\b/.test(normalized) ||
+    // Fetches update refs/remotes/ which our watchers do not watch, so
+    // ahead/behind counts can drift stale until the next refresh.
+    /\bgit\s+fetch\b/.test(normalized)
+  );
 }

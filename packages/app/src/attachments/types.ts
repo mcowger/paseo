@@ -1,4 +1,8 @@
-import type { AgentAttachment, GitHubSearchItem } from "@getpaseo/protocol/messages";
+import type {
+  AgentAttachment,
+  GitHubSearchItem,
+  UploadedFileAttachment,
+} from "@getpaseo/protocol/messages";
 
 export type AttachmentStorageType = "web-indexeddb" | "desktop-file" | "native-file";
 
@@ -38,17 +42,60 @@ export interface BrowserElementAttachment {
   } | null;
   parentChain: string[];
   children: string[];
+  /** Free-text review note the user wrote about this element, if any. */
+  comment?: string;
+  /**
+   * Cropped screenshot of the selected element, sent to the agent as an image
+   * alongside the textual element context. Persisted via the attachment store;
+   * referenced by id so the draft-store GC keeps it alive.
+   */
+  screenshot?: AttachmentMetadata;
   formatted: string;
 }
 
-export type ComposerAttachment =
+export type PullRequestContextAttachmentKind =
+  | "github.pull_request_comment"
+  | "github.pull_request_review"
+  | "github.pull_request_check";
+
+interface PullRequestContextAttachmentFields {
+  id: string;
+  title: string;
+  subtitle?: string;
+  text: string;
+  url?: string | null;
+}
+
+export type PullRequestContextAttachment =
+  | ({ kind: "github.pull_request_comment" } & PullRequestContextAttachmentFields)
+  | ({ kind: "github.pull_request_review" } & PullRequestContextAttachmentFields)
+  | ({ kind: "github.pull_request_check" } & PullRequestContextAttachmentFields);
+
+export interface ChatHistoryContextAttachment {
+  kind: "chat_history";
+  id: string;
+  attachment: Extract<AgentAttachment, { type: "text" }>;
+  source: {
+    serverId: string;
+    agentId: string;
+    boundaryMessageId?: string | null;
+    itemCount?: number;
+  };
+}
+
+export type UserComposerAttachment =
   | { kind: "image"; metadata: AttachmentMetadata }
+  | { kind: "file"; attachment: UploadedFileAttachment }
   | { kind: "github_issue"; item: GitHubSearchItem }
-  | { kind: "github_pr"; item: GitHubSearchItem }
+  | { kind: "github_pr"; item: GitHubSearchItem };
+
+export type WorkspaceComposerAttachment =
   | {
       kind: "browser_element";
       attachment: BrowserElementAttachment;
     }
+  | PullRequestContextAttachment
+  | ChatHistoryContextAttachment
   | {
       kind: "review";
       attachment: Extract<AgentAttachment, { type: "review" }>;
@@ -56,15 +103,7 @@ export type ComposerAttachment =
       commentCount: number;
     };
 
-export type UserComposerAttachment = Exclude<
-  ComposerAttachment,
-  { kind: "review" } | { kind: "browser_element" }
->;
-
-export type WorkspaceComposerAttachment = Extract<
-  ComposerAttachment,
-  { kind: "review" } | { kind: "browser_element" }
->;
+export type ComposerAttachment = UserComposerAttachment | WorkspaceComposerAttachment;
 
 export type AttachmentDataSource =
   | { kind: "bytes"; bytes: Uint8Array }

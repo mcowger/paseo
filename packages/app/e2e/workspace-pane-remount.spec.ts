@@ -18,10 +18,11 @@ test.describe("Workspace pane mounting", () => {
     try {
       const agent = await createIdleAgent(workspace.client, {
         cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         title: `pane-remount-${Date.now()}`,
       });
 
-      await page.goto(buildHostAgentDetailRoute(serverId, agent.id, agent.cwd));
+      await page.goto(buildHostAgentDetailRoute(serverId, agent.id, agent.workspaceId));
       await page.waitForURL(
         (url) => url.pathname.includes("/workspace/") && !url.searchParams.has("open"),
         { timeout: 60_000 },

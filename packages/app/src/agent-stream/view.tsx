@@ -2,6 +2,7 @@ import React, {
   forwardRef,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -10,6 +11,8 @@ import React, {
   type ComponentProps,
   type ReactNode,
 } from "react";
+import { useRouter } from "expo-router";
+import { useTranslation } from "react-i18next";
 import {
   View,
   Text,
@@ -49,6 +52,7 @@ import type { AgentScreenAgent } from "@/hooks/use-agent-screen-state-machine";
 import { useSessionStore } from "@/stores/session-store";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
 import { useLoadOlderAgentHistory } from "@/hooks/use-load-older-agent-history";
+import { useSettings } from "@/hooks/use-settings";
 import type { ToastApi } from "@/components/toast-host";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { ToolCallDetailsContent } from "@/components/tool-call-details";
@@ -57,7 +61,12 @@ import { ToolCallSheetProvider } from "@/components/tool-call-sheet";
 import { type AgentStreamRenderModel, buildAgentStreamRenderModel } from "./model";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
-import { CompletedTurnFooterRow, TurnFooter, type TurnContentStrategy } from "./turn-footer";
+import {
+  CompletedTurnFooterRow,
+  TurnFooter,
+  type AssistantTurnForkHandler,
+  type TurnContentStrategy,
+} from "./turn-footer";
 import { layoutStream, type StreamLayoutItem } from "./layout";
 import {
   type BottomAnchorLocalRequest,
@@ -73,12 +82,22 @@ import {
   type OpenFileDisposition,
   type WorkspaceFileOpenRequest,
 } from "@/workspace/file-open";
-import { resolveWorkspaceIdByExecutionDirectory } from "@/utils/workspace-execution";
 import { navigateToPreparedWorkspaceTab } from "@/utils/workspace-navigation";
+import { buildNewWorkspaceRoute } from "@/utils/host-routes";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { isWeb } from "@/constants/platform";
 import type { Theme } from "@/styles/theme";
 import { recordRenderProfileReasons } from "@/utils/render-profiler";
+import { MountedTabActiveContext } from "@/components/split-container";
+import { generateDraftId } from "@/stores/draft-keys";
+import {
+  buildDraftWorkspaceAttachmentScopeKey,
+  useWorkspaceAttachmentsStore,
+} from "@/attachments/workspace-attachments-store";
+import type { WorkspaceComposerAttachment } from "@/attachments/types";
+import type { WorkspaceDraftTabSetup, WorkspaceTabTarget } from "@/stores/workspace-tabs-store";
+import { toErrorMessage } from "@/utils/error-messages";
+import { useWorkspaceDraftSubmissionStore } from "@/stores/workspace-draft-submission-store";
 
 function renderLiveAuxiliaryNode(input: {
   pendingPermissions: ReactNode;
@@ -119,6 +138,7 @@ function renderStreamItemWithTurnFooter(input: {
   content: ReactNode;
   layoutItem: StreamLayoutItem;
   strategy: TurnContentStrategy;
+  onForkAssistantTurn?: AssistantTurnForkHandler;
 }): ReactNode {
   if (!input.content) {
     return null;
@@ -131,6 +151,7 @@ function renderStreamItemWithTurnFooter(input: {
       items={footerHost.items}
       timing={footerHost.timing}
       startIndex={footerHost.startIndex}
+      onForkAssistantTurn={input.onForkAssistantTurn}
     />
   ) : null;
   const content = (
@@ -157,6 +178,7 @@ function renderStreamItemWithTurnFooter(input: {
 function renderListEmptyComponent(input: {
   renderModel: AgentStreamRenderModel;
   emptyStateStyle: StyleProp<ViewStyle>;
+  emptyText: string;
 }): ReactNode {
   if (
     input.renderModel.boundary.hasVirtualizedHistory ||
@@ -170,7 +192,7 @@ function renderListEmptyComponent(input: {
 
   return (
     <View style={input.emptyStateStyle}>
-      <Text style={stylesheet.emptyStateText}>Start chatting with this agent...</Text>
+      <Text style={stylesheet.emptyStateText}>{input.emptyText}</Text>
     </View>
   );
 }
@@ -230,6 +252,56 @@ const AGENT_CAPABILITY_FLAG_KEYS: (keyof AgentCapabilityFlags)[] = [
 
 const EMPTY_STREAM_HEAD: StreamItem[] = [];
 
+function buildChatHistoryAttachment(input: {
+  draftId: string;
+  serverId: string;
+  agentId: string;
+  payload: Awaited<ReturnType<DaemonClient["buildAgentForkContext"]>>;
+  missingAttachmentMessage: string;
+}): WorkspaceComposerAttachment {
+  if (!input.payload.attachment) {
+    throw new Error(input.missingAttachmentMessage);
+  }
+  return {
+    kind: "chat_history",
+    id: `chat_history:${input.draftId}`,
+    attachment: input.payload.attachment,
+    source: {
+      serverId: input.serverId,
+      agentId: input.agentId,
+      boundaryMessageId: input.payload.boundaryMessageId,
+      itemCount: input.payload.itemCount,
+    },
+  };
+}
+
+function buildForkDraftSetup(agent: AgentScreenAgent): WorkspaceDraftTabSetup | undefined {
+  if (!agent.provider) {
+    return undefined;
+  }
+
+  const featureValues: Record<string, unknown> = {};
+  for (const feature of agent.features ?? []) {
+    featureValues[feature.id] = feature.value;
+  }
+
+  return {
+    provider: agent.provider,
+    cwd: agent.cwd,
+    modeId: agent.currentModeId ?? agent.runtimeInfo?.modeId ?? null,
+    model: agent.model ?? agent.runtimeInfo?.model ?? null,
+    thinkingOptionId: agent.thinkingOptionId ?? agent.runtimeInfo?.thinkingOptionId ?? null,
+    featureValues,
+  };
+}
+
+function buildForkDraftTabTarget(
+  setup: WorkspaceDraftTabSetup | undefined,
+  draftId: string,
+): WorkspaceTabTarget {
+  return setup ? { kind: "draft", draftId, setup } : { kind: "draft", draftId };
+}
+
 const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
   function AgentStreamView(
     {
@@ -245,6 +317,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     },
     ref,
   ) {
+    const { t } = useTranslation();
+    const router = useRouter();
+    const autoExpandReasoning = useSettings((settings) => settings.autoExpandReasoning);
     const viewportRef = useRef<StreamViewportHandle | null>(null);
     const isMobile = useIsCompactFormFactor();
     const streamRenderStrategy = useMemo(
@@ -269,15 +344,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const streamHead = useSessionStore((state) =>
       state.sessions[resolvedServerId]?.agentStreamHead?.get(agentId),
     );
+    const supportsAgentForkContext = useSessionStore(
+      (state) => state.sessions[resolvedServerId]?.serverInfo?.features?.agentForkContext === true,
+    );
 
     const workspaceRoot = agent.cwd?.trim() || "";
-    const workspaceId = resolveWorkspaceIdByExecutionDirectory({
-      workspaces: useSessionStore.getState().sessions[resolvedServerId]?.workspaces?.values(),
-      workspaceDirectory: workspaceRoot,
-    });
     const { requestDirectoryListing } = useFileExplorerActions({
       serverId: resolvedServerId,
-      workspaceId: workspaceId ?? undefined,
+      workspaceId: agent.workspaceId,
       workspaceRoot,
     });
     const { isLoadingOlder, hasOlder, loadOlder } = useLoadOlderAgentHistory({
@@ -329,10 +403,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             return;
           }
 
-          if (workspaceId) {
+          if (agent.workspaceId) {
             navigateToPreparedWorkspaceTab({
               serverId: resolvedServerId,
-              workspaceId,
+              workspaceId: agent.workspaceId,
               target: createWorkspaceFileTabTarget(location),
             });
           }
@@ -361,15 +435,99 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       handleInlinePathPress({ raw: filePath, path: filePath }, "main");
     });
 
+    const handleForkAssistantTurn: AssistantTurnForkHandler = useStableEvent(
+      async ({ target, boundaryMessageId }) => {
+        try {
+          if (!supportsAgentForkContext) {
+            toast?.error(t("message.actions.forkUnavailable"));
+            return;
+          }
+          if (!client) {
+            throw new Error(t("workspace.terminal.hostDisconnected"));
+          }
+          const draftSetup = buildForkDraftSetup(agent);
+          const prepareForkDraft = async () => {
+            const draftId = generateDraftId();
+            const payload = await client.buildAgentForkContext(
+              agentId,
+              boundaryMessageId ? { boundaryMessageId } : {},
+            );
+            const attachment = buildChatHistoryAttachment({
+              draftId,
+              serverId: resolvedServerId,
+              agentId,
+              payload,
+              missingAttachmentMessage: t("message.actions.forkFailed"),
+            });
+            useWorkspaceAttachmentsStore.getState().setWorkspaceAttachments({
+              scopeKey: buildDraftWorkspaceAttachmentScopeKey(draftId),
+              attachments: [attachment],
+            });
+            return draftId;
+          };
+
+          if (target === "tab") {
+            const workspaceId = agent.workspaceId;
+            if (!workspaceId) {
+              throw new Error(t("message.actions.forkMissingWorkspace"));
+            }
+            const draftId = await prepareForkDraft();
+            navigateToPreparedWorkspaceTab({
+              serverId: resolvedServerId,
+              workspaceId,
+              target: buildForkDraftTabTarget(draftSetup, draftId),
+            });
+            return;
+          }
+
+          const draftId = await prepareForkDraft();
+          const sourceDirectory =
+            agent.projectPlacement?.checkout?.cwd?.trim() || agent.cwd.trim() || undefined;
+          if (draftSetup) {
+            useWorkspaceDraftSubmissionStore.getState().setDraftSetup({
+              draftId,
+              setup: draftSetup,
+              sourceDirectory,
+            });
+          }
+          router.push(
+            buildNewWorkspaceRoute({
+              serverId: resolvedServerId,
+              sourceDirectory,
+              displayName: agent.projectPlacement?.projectName,
+              projectId: agent.projectPlacement?.projectKey,
+              draftId,
+            }),
+          );
+        } catch (error) {
+          toast?.error(toErrorMessage(error) || t("message.actions.forkFailed"));
+        }
+      },
+    );
+
+    // Freeze stream data while this tab slot is hidden to prevent offscreen FlatList
+    // cell-window renders on every 48ms flush from background agents.
+    // When isActive flips back to true, the context change triggers a re-render and
+    // the component reads the current (fresh) streamItems/streamHead from props.
+    const isActive = useContext(MountedTabActiveContext);
+    const frozenStreamItemsRef = useRef(streamItems);
+    const frozenStreamHeadRef = useRef(streamHead);
+    if (isActive) {
+      frozenStreamItemsRef.current = streamItems;
+      frozenStreamHeadRef.current = streamHead;
+    }
+    const effectiveStreamItems = isActive ? streamItems : frozenStreamItemsRef.current;
+    const effectiveStreamHead = isActive ? streamHead : frozenStreamHeadRef.current;
+
     const baseRenderModel = useMemo(() => {
       return buildAgentStreamRenderModel({
         agentStatus: agent.status,
-        tail: streamItems,
-        head: streamHead ?? EMPTY_STREAM_HEAD,
+        tail: effectiveStreamItems,
+        head: effectiveStreamHead ?? EMPTY_STREAM_HEAD,
         platform: isWeb ? "web" : "native",
         isMobileBreakpoint: isMobile,
       });
-    }, [agent.status, isMobile, streamHead, streamItems]);
+    }, [agent.status, isMobile, effectiveStreamHead, effectiveStreamItems]);
     const streamLayout = useMemo(
       () =>
         layoutStream({
@@ -477,10 +635,12 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             args={item.text}
             status={item.status === "ready" ? "completed" : "executing"}
             isLastInSequence={layoutItem.isLastInToolSequence}
+            defaultExpanded={autoExpandReasoning}
+            forceInline={autoExpandReasoning}
           />
         );
       },
-      [setInlineDetailsExpanded],
+      [autoExpandReasoning, setInlineDetailsExpanded],
     );
 
     const renderToolCallItem = useCallback(
@@ -588,9 +748,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           content,
           layoutItem,
           strategy: streamRenderStrategy,
+          onForkAssistantTurn: handleForkAssistantTurn,
         });
       },
-      [renderStreamItemContent, streamRenderStrategy],
+      [handleForkAssistantTurn, renderStreamItemContent, streamRenderStrategy],
     );
 
     const pendingPermissionItems = useMemo(
@@ -615,9 +776,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             inFlightTurnStartedAt={baseRenderModel.turnTiming.runningStartedAt}
             host={bottomTurnFooterHost}
             strategy={streamRenderStrategy}
+            onForkAssistantTurn={handleForkAssistantTurn}
           />
         ) : null,
       [
+        handleForkAssistantTurn,
         showRunningTurnFooter,
         baseRenderModel.turnTiming.runningStartedAt,
         bottomTurnFooterHost,
@@ -637,8 +800,13 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     const emptyStateStyle = useMemo(() => [stylesheet.emptyState, stylesheet.contentWrapper], []);
     const listEmptyComponent = useMemo(
-      () => renderListEmptyComponent({ renderModel, emptyStateStyle }),
-      [renderModel, emptyStateStyle],
+      () =>
+        renderListEmptyComponent({
+          renderModel,
+          emptyStateStyle,
+          emptyText: t("agentStream.empty"),
+        }),
+      [renderModel, emptyStateStyle, t],
     );
 
     const { boundary, auxiliary } = renderModel;
@@ -676,14 +844,17 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       (item) => renderHistoryRow(item),
       [renderHistoryRow],
     );
-    const renderLiveHeadRow = useCallback<StreamSegmentRenderers["renderLiveHeadRow"]>(
-      (item) =>
+    // useStableEvent keeps the function reference stable across flushes.
+    // layoutLiveHeadItemById and renderStreamItem are read from the ref at call time,
+    // so the live-head render always uses the latest layout without causing renderers
+    // to be a new object on every text-chunk flush.
+    const renderLiveHeadRow: StreamSegmentRenderers["renderLiveHeadRow"] = useStableEvent(
+      (item: StreamItem) =>
         renderLiveHeadStreamItem({
           item,
           layoutItemById: layoutLiveHeadItemById,
           renderStreamItem,
         }),
-      [layoutLiveHeadItemById, renderStreamItem],
     );
     const renderLiveAuxiliary = useCallback<StreamSegmentRenderers["renderLiveAuxiliary"]>(() => {
       return renderLiveAuxiliaryNode({
@@ -745,7 +916,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
                   style={stylesheet.scrollToBottomButton}
                   onPress={scrollToBottom}
                   accessibilityRole="button"
-                  accessibilityLabel="Scroll to bottom"
+                  accessibilityLabel={t("agentStream.scrollToBottom")}
                   testID="scroll-to-bottom-button"
                 >
                   <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
@@ -766,22 +937,60 @@ function agentCapabilityFlagsEqual(
   return AGENT_CAPABILITY_FLAG_KEYS.every((key) => left?.[key] === right?.[key]);
 }
 
+function collectAgentProjectPlacementDiffs(
+  left: AgentScreenAgent["projectPlacement"],
+  right: AgentScreenAgent["projectPlacement"],
+): string[] {
+  const reasons: string[] = [];
+  if (left?.checkout?.cwd !== right?.checkout?.cwd) {
+    reasons.push("agent.projectPlacement.checkout.cwd");
+  }
+  if (left?.checkout?.isGit !== right?.checkout?.isGit) {
+    reasons.push("agent.projectPlacement.checkout.isGit");
+  }
+  if (left?.projectName !== right?.projectName) {
+    reasons.push("agent.projectPlacement.projectName");
+  }
+  if (left?.projectKey !== right?.projectKey) {
+    reasons.push("agent.projectPlacement.projectKey");
+  }
+  return reasons;
+}
+
+function collectAgentSetupDiffs(left: AgentScreenAgent, right: AgentScreenAgent): string[] {
+  const reasons: string[] = [];
+  if (left.provider !== right.provider) reasons.push("agent.provider");
+  if (left.currentModeId !== right.currentModeId) reasons.push("agent.currentModeId");
+  if (left.model !== right.model) reasons.push("agent.model");
+  if (left.thinkingOptionId !== right.thinkingOptionId) {
+    reasons.push("agent.thinkingOptionId");
+  }
+  if (left.runtimeInfo?.modeId !== right.runtimeInfo?.modeId) {
+    reasons.push("agent.runtimeInfo.modeId");
+  }
+  if (left.runtimeInfo?.model !== right.runtimeInfo?.model) {
+    reasons.push("agent.runtimeInfo.model");
+  }
+  if (left.runtimeInfo?.thinkingOptionId !== right.runtimeInfo?.thinkingOptionId) {
+    reasons.push("agent.runtimeInfo.thinkingOptionId");
+  }
+  if (left.features !== right.features) reasons.push("agent.features");
+  return reasons;
+}
+
 function collectAgentScreenAgentDiffs(left: AgentScreenAgent, right: AgentScreenAgent): string[] {
   const reasons: string[] = [];
   if (left.serverId !== right.serverId) reasons.push("agent.serverId");
   if (left.id !== right.id) reasons.push("agent.id");
+  if (left.workspaceId !== right.workspaceId) reasons.push("agent.workspaceId");
   if (left.status !== right.status) reasons.push("agent.status");
   if (left.cwd !== right.cwd) reasons.push("agent.cwd");
   if (!agentCapabilityFlagsEqual(left.capabilities, right.capabilities)) {
     reasons.push("agent.capabilities");
   }
   if (left.lastError !== right.lastError) reasons.push("agent.lastError");
-  if (left.projectPlacement?.checkout?.cwd !== right.projectPlacement?.checkout?.cwd) {
-    reasons.push("agent.projectPlacement.checkout.cwd");
-  }
-  if (left.projectPlacement?.checkout?.isGit !== right.projectPlacement?.checkout?.isGit) {
-    reasons.push("agent.projectPlacement.checkout.isGit");
-  }
+  reasons.push(...collectAgentSetupDiffs(left, right));
+  reasons.push(...collectAgentProjectPlacementDiffs(left.projectPlacement, right.projectPlacement));
   return reasons;
 }
 
@@ -906,11 +1115,14 @@ function PermissionRequestCard({
   permission: PendingPermission;
   client: DaemonClient | null;
 }) {
+  const { t } = useTranslation();
   const isMobile = useIsCompactFormFactor();
 
   const { request } = permission;
   const isPlanRequest = request.kind === "plan";
-  const title = isPlanRequest ? "Plan" : (request.title ?? request.name ?? "Permission Required");
+  const title = isPlanRequest
+    ? t("agentStream.permission.plan")
+    : (request.title ?? request.name ?? t("agentStream.permission.required"));
   const description = request.description ?? "";
   const resolvedToolCallDetail = useMemo(
     () =>
@@ -931,19 +1143,21 @@ function PermissionRequestCard({
     return [
       {
         id: "reject",
-        label: "Deny",
+        label: t("agentStream.permission.deny"),
         behavior: "deny",
         variant: "danger",
         intent: "dismiss",
       },
       {
         id: "accept",
-        label: isPlanRequest ? "Implement" : "Accept",
+        label: isPlanRequest
+          ? t("agentStream.permission.implement")
+          : t("agentStream.permission.accept"),
         behavior: "allow",
         variant: "primary",
       },
     ];
-  }, [isPlanRequest, request]);
+  }, [isPlanRequest, request, t]);
 
   const planMarkdown = useMemo(() => {
     if (!request) {
@@ -968,7 +1182,7 @@ function PermissionRequestCard({
       response: AgentPermissionResponse;
     }) => {
       if (!client) {
-        throw new Error("Daemon client unavailable");
+        throw new Error(t("common.errors.daemonClientUnavailable"));
       }
       return client.respondToPermissionAndWait(
         input.agentId,
@@ -1042,7 +1256,7 @@ function PermissionRequestCard({
   const footer = (
     <>
       <Text testID="permission-request-question" style={permissionStyles.question}>
-        How would you like to proceed?
+        {t("agentStream.permission.question")}
       </Text>
 
       <View style={optionsContainerStyle}>
@@ -1094,7 +1308,7 @@ function PermissionRequestCard({
 
       {planMarkdown ? (
         <PlanCard
-          title="Proposed plan"
+          title={t("agentStream.permission.proposedPlan")}
           text={planMarkdown}
           testID="permission-plan-card"
           disableOuterSpacing

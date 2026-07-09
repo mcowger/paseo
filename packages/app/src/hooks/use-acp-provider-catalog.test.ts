@@ -37,12 +37,13 @@ describe("ACP provider catalog", () => {
   it("uses PATH commands for entries that were binary distributions upstream", () => {
     expect(findProvider("amp-acp").command).toEqual(["amp-acp"]);
     expect(findProvider("cursor").command).toEqual(["cursor-agent", "acp"]);
-    expect(findProvider("deepseek-tui").command).toEqual(["deepseek", "serve", "--acp"]);
+    expect(findProvider("codewhale").command).toEqual(["codewhale", "serve", "--acp"]);
     expect(findProvider("devin").command).toEqual(["devin", "acp"]);
     expect(findProvider("goose").command).toEqual(["goose", "acp"]);
     expect(findProvider("junie").command).toEqual(["junie", "--acp", "true"]);
     expect(findProvider("kiro").command).toEqual(["kiro-cli", "acp"]);
     expect(findProvider("poolside").command).toEqual(["pool", "acp"]);
+    expect(findProvider("traecli").command).toEqual(["traecli", "acp", "serve"]);
   });
 
   it("maps a catalog entry to the daemon provider config patch", () => {
@@ -64,6 +65,14 @@ describe("ACP provider catalog", () => {
 
     expect(patch.providers?.auggie?.env).toEqual({
       AUGMENT_DISABLE_AUTO_UPDATE: "1",
+    });
+  });
+
+  it("preserves provider params in the daemon config patch", () => {
+    const droidPatch = buildAcpProviderConfigPatch(findProvider("factory-droid"));
+
+    expect(droidPatch.providers?.["factory-droid"]?.params).toEqual({
+      supportsMcpServers: false,
     });
   });
 });

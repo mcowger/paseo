@@ -1,35 +1,42 @@
 import { useCallback } from "react";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
-import { generateDraftId } from "@/stores/draft-keys";
-import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
-import { openProjectDirectly } from "@/hooks/open-project";
+import { openProjectDirectly, type OpenProjectResult } from "@/hooks/open-project";
 
-export function useOpenProject(serverId: string | null): (path: string) => Promise<boolean> {
+export function useOpenProject(
+  serverId: string | null,
+): (path: string) => Promise<OpenProjectResult> {
   const normalizedServerId = serverId?.trim() ?? "";
   const client = useHostRuntimeClient(normalizedServerId);
   const isConnected = useHostRuntimeIsConnected(normalizedServerId);
-  const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
+  const canAddProject = useSessionStore((state) =>
+    normalizedServerId
+      ? state.sessions[normalizedServerId]?.serverInfo?.features?.projectAdd === true
+      : false,
+  );
+  const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
     async (path: string) => {
-      return openProjectDirectly({
+      const result = await openProjectDirectly({
         serverId: normalizedServerId,
         projectPath: path,
         isConnected,
+        canAddProject,
         client,
-        mergeWorkspaces,
+        addEmptyProject,
         setHasHydratedWorkspaces,
-        openDraftTab: (workspaceKey: string) =>
-          useWorkspaceLayoutStore.getState().openTabFocused(workspaceKey, {
-            kind: "draft",
-            draftId: generateDraftId(),
-          }),
-        navigateToWorkspace,
       });
+      return result;
     },
-    [client, isConnected, mergeWorkspaces, normalizedServerId, setHasHydratedWorkspaces],
+    [
+      addEmptyProject,
+      canAddProject,
+      client,
+      isConnected,
+      normalizedServerId,
+      setHasHydratedWorkspaces,
+    ],
   );
 }

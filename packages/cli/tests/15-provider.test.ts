@@ -46,6 +46,11 @@ interface ProviderListRow {
 
 const EXPECTED_CLAUDE_MODELS = [
   {
+    id: "claude-fable-5",
+    model: "Fable 5",
+    descriptionFragment: "Most powerful",
+  },
+  {
     id: "claude-opus-4-8[1m]",
     model: "Opus 4.8 1M",
     descriptionFragment: "1M context window",
@@ -54,6 +59,11 @@ const EXPECTED_CLAUDE_MODELS = [
     id: "claude-opus-4-8",
     model: "Opus 4.8",
     descriptionFragment: "Latest release",
+  },
+  {
+    id: "claude-sonnet-5",
+    model: "Sonnet 5",
+    descriptionFragment: "Best for everyday tasks",
   },
   {
     id: "claude-opus-4-7[1m]",
@@ -200,10 +210,16 @@ try {
       data.some((p: { provider: string }) => p.provider === "opencode"),
       "should include opencode",
     );
-    assert(
-      data.every((p: ProviderListRow) => p.enabled === "Enabled"),
-      "enabled providers should report Enabled",
-    );
+    const rows = data as ProviderListRow[];
+    for (const provider of ["claude", "codex", "opencode"] as const) {
+      const row = rows.find((p) => p.provider === provider);
+      assert(row, `should include ${provider}`);
+      assert.strictEqual(row.enabled, "Enabled", `${provider} should report Enabled`);
+    }
+
+    const omp = rows.find((p) => p.provider === "omp");
+    assert(omp, "should include omp");
+    assert.strictEqual(omp.enabled, "Disabled", "omp should report Disabled by default");
     console.log("✓ provider ls --json outputs valid JSON\n");
   }
 
@@ -381,7 +397,7 @@ try {
       "--quiet should print the current Claude catalog IDs",
     );
     assert(
-      claudeModelsFromJson.some((m) => m.id === "claude-sonnet-4-6"),
+      claudeModelsFromJson.some((m) => m.id === "claude-sonnet-5"),
       "captured --json output should include the current Claude everyday model id",
     );
     console.log("✓ provider models --quiet outputs model IDs only\n");

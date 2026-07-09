@@ -37,10 +37,12 @@ export interface PiRuntimeSession {
     message: string,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void>;
+  compact(customInstructions?: string): Promise<void>;
+  setAutoCompaction(enabled: boolean): Promise<void>;
   abort(): Promise<void>;
   getState(): Promise<PiSessionState>;
   getMessages(): Promise<PiAgentMessage[]>;
-  getAvailableModels(): Promise<PiModel[]>;
+  getAvailableModels(timeoutMs?: number): Promise<PiModel[]>;
   setModel(provider: string, modelId: string): Promise<PiModel>;
   setThinkingLevel(level: string): Promise<void>;
   getSessionStats(): Promise<PiSessionStats>;

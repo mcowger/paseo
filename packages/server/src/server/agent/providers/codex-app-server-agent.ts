@@ -13,6 +13,7 @@ import {
   type AgentPermissionRequest,
   type AgentPermissionResponse,
   type AgentPermissionResult,
+  type AgentProviderNotice,
   type AgentPromptContentBlock,
   type AgentPromptInput,
   type AgentRunOptions,
@@ -25,17 +26,19 @@ import {
   type AgentTimelineItem,
   type ToolCallTimelineItem,
   type AgentUsage,
-  type ListModelsOptions,
-  type ListPersistedAgentsOptions,
-  type PersistedAgentDescriptor,
+  type FetchCatalogOptions,
+  type ImportableProviderSession,
+  type ImportProviderSessionContext,
+  type ImportProviderSessionInput,
+  type ListImportableSessionsOptions,
+  type ProviderCatalog,
 } from "../agent-sdk-types.js";
+import { importSessionFromPersistence } from "../provider-session-import.js";
 import type { Logger } from "pino";
-import { homedir } from "node:os";
 
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Dirent } from "node:fs";
-import * as fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -46,6 +49,7 @@ import { curateAgentActivity } from "../activity-curator.js";
 import {
   mapCodexToolCallEnvelope,
   mapCodexToolCallFromThreadItem,
+  splitCodexMcpToolResultImages,
 } from "./codex/tool-call-mapper.js";
 import {
   checkProviderLaunchAvailable,
@@ -55,7 +59,10 @@ import {
   type ProviderRuntimeSettings,
   type ResolvedProviderLaunch,
 } from "../provider-launch-config.js";
-import { findExecutable, probeExecutable } from "../../../utils/executable.js";
+import {
+  findExecutable,
+  probeExecutable,
+} from "../../../executable-resolution/executable-resolution.js";
 import { createPathEquivalenceMatcher } from "../../../utils/path.js";
 import { spawnProcess } from "../../../utils/spawn.js";
 import { extractCodexTerminalSessionId, nonEmptyString } from "./tool-call-mapper-utils.js";
@@ -72,19 +79,20 @@ import {
 } from "./codex/app-server-transport.js";
 import { type CodexUserMessageTurnIndex, revertCodexConversation } from "./codex/rewind.js";
 import {
+  materializeProviderImage,
   renderProviderImageOutputAsAssistantMarkdown,
   type ProviderImageOutput,
 } from "./provider-image-output.js";
 import { normalizeProviderReplayTimestamp } from "../provider-history-timestamps.js";
 import {
-  formatDiagnosticStatus,
   formatProviderDiagnostic,
   formatProviderDiagnosticError,
   buildBinaryDiagnosticRows,
+  buildCommandResolutionDiagnosticRows,
   resolveBinaryVersion,
-  toDiagnosticErrorMessage,
 } from "./diagnostic-utils.js";
 import { runProviderTurn } from "./provider-runner.js";
+import { SETTING_APPLIES_NEXT_TURN_NOTICE } from "../provider-notices.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 
 function assertChildWithPipes(
@@ -99,10 +107,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isCodexAlreadyUnarchivedError(error: unknown, threadId: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes(`no archived rollout found for thread id ${threadId}`);
+}
+
 const TURN_START_TIMEOUT_MS = 90 * 1000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
 const CODEX_PROVIDER = "codex" as const;
-const CODEX_IMAGE_ATTACHMENT_DIR = "paseo-attachments";
+// Codex treats most app-server client names as the model-request originator.
+// This reserved Codex name is non-originating, so requests keep Codex's default
+// CLI identity instead of showing up as Paseo in provider usage logs.
+const CODEX_NON_ORIGINATING_APP_SERVER_CLIENT_INFO = {
+  name: "codex_app_server_daemon",
+  title: "Codex App Server Daemon",
+  version: "0.0.0",
+} as const;
 const ASSISTANT_MESSAGE_BOUNDARY_MARKDOWN = "\n\n---\n\n";
 const CODEX_TOOL_THREAD_ITEM_TYPES = new Set([
   "commandExecution",
@@ -164,6 +184,7 @@ function formatOutOfBandStatusMessage(text: string): string {
 const CODEX_APP_SERVER_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: true,
+  supportsSessionListing: true,
   supportsDynamicModes: false,
   supportsMcpServers: true,
   supportsReasoningStream: true,
@@ -623,6 +644,7 @@ async function listCodexCustomPrompts(): Promise<AgentSlashCommand[]> {
         name: `prompts:${name}`,
         description,
         argumentHint,
+        kind: "command",
       };
     }),
   );
@@ -687,6 +709,7 @@ export async function listCodexSkills(
           name,
           description,
           argumentHint: "",
+          kind: "skill",
         });
       }
     }
@@ -829,11 +852,6 @@ function filterCodexThreadsByCwd(
   // with no cwd would falsely match the daemon's own cwd.
   const matchesCwd = createPathEquivalenceMatcher(cwd);
   return threads.filter((thread) => typeof thread.cwd === "string" && matchesCwd(thread.cwd));
-}
-
-function buildCodexThreadListTimeline(thread: Record<string, unknown>): AgentTimelineItem[] {
-  const preview = typeof thread.preview === "string" ? thread.preview.trim() : "";
-  return preview ? [{ type: "user_message", text: preview }] : [];
 }
 
 export function toAgentUsage(tokenUsage: unknown): AgentUsage | undefined {
@@ -1608,25 +1626,6 @@ function codexImageOutputFromResult(result: unknown): ProviderImageOutput | null
   };
 }
 
-function writeImageAttachmentSync(mimeType: string, data: string): string {
-  const attachmentsDir = path.join(os.tmpdir(), CODEX_IMAGE_ATTACHMENT_DIR);
-  fsSync.mkdirSync(attachmentsDir, { recursive: true });
-  const normalized = normalizeImageData(mimeType, data);
-  const extension = getImageExtension(normalized.mimeType);
-  const filename = `${randomUUID()}.${extension}`;
-  const filePath = path.join(attachmentsDir, filename);
-  fsSync.writeFileSync(filePath, Buffer.from(normalized.data, "base64"));
-  return filePath;
-}
-
-function materializeCodexImageOutput(image: { data: string; mimeType: string | null }): {
-  path: string;
-} {
-  return {
-    path: writeImageAttachmentSync(image.mimeType ?? "image/png", image.data),
-  };
-}
-
 function mapCodexThreadImageItem(
   normalizedType: string,
   normalizedItem: Record<string, unknown>,
@@ -1646,7 +1645,7 @@ function mapCodexThreadImageItem(
       data: result?.data ?? null,
       mimeType: result?.mimeType ?? null,
     },
-    { materialize: materializeCodexImageOutput },
+    { materialize: materializeProviderImage },
   );
 }
 
@@ -1698,6 +1697,39 @@ export function threadItemToTimeline(
   }
 }
 
+function mcpToolResultImagesToTimeline(item: unknown): AgentTimelineItem[] {
+  const itemRecord = toObjectRecord(item);
+  if (!itemRecord) {
+    return [];
+  }
+  const normalizedType = normalizeCodexThreadItemType(
+    typeof itemRecord.type === "string" ? itemRecord.type : undefined,
+  );
+  if (normalizedType !== "mcpToolCall") {
+    return [];
+  }
+
+  const { images } = splitCodexMcpToolResultImages(itemRecord.result);
+  return images
+    .map((image) =>
+      renderProviderImageOutputAsAssistantMarkdown(image, {
+        materialize: materializeProviderImage,
+      }),
+    )
+    .filter((timelineItem): timelineItem is AgentTimelineItem => timelineItem !== null);
+}
+
+function threadItemToTimelineEntries(
+  item: unknown,
+  options?: { includeUserMessage?: boolean; cwd?: string | null },
+): AgentTimelineItem[] {
+  const timelineItem = threadItemToTimeline(item, options);
+  if (!timelineItem) {
+    return [];
+  }
+  return [timelineItem, ...mcpToolResultImagesToTimeline(item)];
+}
+
 const CodexThreadReadResponseSchema = z
   .object({
     thread: z
@@ -1737,8 +1769,7 @@ async function loadCodexThreadHistoryTimeline(params: {
   const timeline: PersistedTimelineEntry[] = [];
   for (const turn of response.thread.turns) {
     for (const item of turn.items) {
-      const timelineItem = threadItemToTimeline(item, { cwd: params.cwd });
-      if (timelineItem) {
+      for (const timelineItem of threadItemToTimelineEntries(item, { cwd: params.cwd })) {
         const timestamp =
           readCodexHistoryTimestamp(item) ?? readCodexTurnHistoryTimestamp(turn, timelineItem);
         timeline.push({
@@ -1789,40 +1820,6 @@ function toSandboxPolicy(type: string, networkAccess?: boolean): Record<string, 
     default:
       return { type: "workspaceWrite", networkAccess: networkAccess ?? false };
   }
-}
-
-function getImageExtension(mimeType: string): string {
-  switch (mimeType) {
-    case "image/jpeg":
-      return "jpg";
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-    case "image/gif":
-      return "gif";
-    case "image/bmp":
-      return "bmp";
-    case "image/tiff":
-      return "tiff";
-    default:
-      return "bin";
-  }
-}
-
-interface ImageDataPayload {
-  mimeType: string;
-  data: string;
-}
-
-function normalizeImageData(mimeType: string, data: string): ImageDataPayload {
-  if (data.startsWith("data:")) {
-    const match = data.match(/^data:([^;]+);base64,(.*)$/);
-    if (match) {
-      return { mimeType: match[1], data: match[2] };
-    }
-  }
-  return { mimeType, data };
 }
 
 const ThreadStartedNotificationSchema = z
@@ -2673,17 +2670,6 @@ const CodexNotificationSchema = z.union([
     ),
 ]);
 
-async function writeImageAttachment(mimeType: string, data: string): Promise<string> {
-  const attachmentsDir = path.join(os.tmpdir(), CODEX_IMAGE_ATTACHMENT_DIR);
-  await fs.mkdir(attachmentsDir, { recursive: true });
-  const normalized = normalizeImageData(mimeType, data);
-  const extension = getImageExtension(normalized.mimeType);
-  const filename = `${randomUUID()}.${extension}`;
-  const filePath = path.join(attachmentsDir, filename);
-  await fs.writeFile(filePath, Buffer.from(normalized.data, "base64"));
-  return filePath;
-}
-
 async function readCodexConfiguredDefaults(
   client: CodexAppServerClient,
   logger: Logger,
@@ -2776,7 +2762,10 @@ export async function codexAppServerTurnInputFromPrompt(
     }
     if (block.type === "image") {
       try {
-        const filePath = await writeImageAttachment(block.mimeType, block.data);
+        const filePath = materializeProviderImage({
+          data: block.data,
+          mimeType: block.mimeType,
+        }).path;
         output.push({ type: "localImage", path: filePath });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -2818,11 +2807,7 @@ function buildCodexAppServerInitializeParams(): {
   capabilities: { experimentalApi: true };
 } {
   return {
-    clientInfo: {
-      name: "paseo",
-      title: "Paseo",
-      version: "0.0.0",
-    },
+    clientInfo: CODEX_NON_ORIGINATING_APP_SERVER_CLIENT_INFO,
     capabilities: {
       experimentalApi: true,
     },
@@ -3645,10 +3630,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     return this.currentMode ?? null;
   }
 
-  async setMode(modeId: string): Promise<void> {
+  async setMode(modeId: string): Promise<void | AgentProviderNotice> {
     validateCodexMode(modeId);
     this.currentMode = modeId;
     this.cachedRuntimeInfo = null;
+    if (this.activeForegroundTurnId) {
+      return SETTING_APPLIES_NEXT_TURN_NOTICE;
+    }
   }
 
   async setModel(modelId: string | null): Promise<void> {
@@ -3660,10 +3648,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.cachedRuntimeInfo = null;
   }
 
-  async setThinkingOption(thinkingOptionId: string | null): Promise<void> {
+  async setThinkingOption(thinkingOptionId: string | null): Promise<void | AgentProviderNotice> {
     this.config.thinkingOptionId = normalizeCodexThinkingOptionId(thinkingOptionId);
     this.refreshResolvedCollaborationMode();
     this.cachedRuntimeInfo = null;
+    if (this.activeForegroundTurnId) {
+      return SETTING_APPLIES_NEXT_TURN_NOTICE;
+    }
   }
 
   async setFeature(featureId: string, value: unknown): Promise<void> {
@@ -3945,6 +3936,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       name: skill.name,
       description: skill.description,
       argumentHint: "",
+      kind: "skill" as const,
     }));
     const fallbackSkills =
       appServerSkills.length === 0
@@ -3955,6 +3947,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         name: "compact",
         description: "Summarize conversation to prevent hitting the context limit",
         argumentHint: "",
+        kind: "command",
       },
     ];
     if (this.goalsEnabled) {
@@ -3962,6 +3955,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         name: "goal",
         description: "Set, pause, resume, or clear the agent's goal",
         argumentHint: "[<objective>|pause|resume|clear]",
+        kind: "command",
       });
     }
     return [...builtin, ...appServerSkills, ...fallbackSkills, ...prompts].sort((a, b) =>
@@ -4887,8 +4881,13 @@ export class CodexAppServerAgentSession implements AgentSession {
       }
       this.warnOnIncompleteEditToolCall(timelineItem, "item_completed", parsed.item);
     }
+    const imageItems = mcpToolResultImagesToTimeline(parsed.item);
     this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: timelineItem });
     if (timelineItem.type === "assistant_message") {
+      this.pendingAssistantMessageBoundary = true;
+    }
+    for (const imageItem of imageItems) {
+      this.emitEvent({ type: "timeline", provider: CODEX_PROVIDER, item: imageItem });
       this.pendingAssistantMessageBoundary = true;
     }
     if (itemId) {
@@ -5478,9 +5477,9 @@ export class CodexAppServerAgentClient implements AgentClient {
     return session;
   }
 
-  async listPersistedAgents(
-    options?: ListPersistedAgentsOptions,
-  ): Promise<PersistedAgentDescriptor[]> {
+  async listImportableSessions(
+    options?: ListImportableSessionsOptions,
+  ): Promise<ImportableProviderSession[]> {
     const child = await this.spawnAppServer();
     const client =
       this.deps._createCodexClient?.(child, this.logger, () => ({})) ??
@@ -5503,44 +5502,45 @@ export class CodexAppServerAgentClient implements AgentClient {
       );
       const allThreads = Array.isArray(response?.data) ? response.data.filter(isRecord) : [];
       const threads = filterCodexThreadsByCwd(allThreads, options?.cwd);
-      const descriptors: PersistedAgentDescriptor[] = threads.slice(0, limit).map((thread) => {
+      return threads.slice(0, limit).map((thread) => {
         const threadId = typeof thread.id === "string" ? thread.id : "";
         const cwd = typeof thread.cwd === "string" ? thread.cwd : process.cwd();
         const preview = typeof thread.preview === "string" ? thread.preview : null;
         const title = typeof thread.name === "string" && thread.name.trim() ? thread.name : preview;
 
         return {
-          provider: CODEX_PROVIDER,
-          sessionId: threadId,
+          providerHandleId: threadId,
           cwd,
           title,
+          firstPromptPreview: preview,
+          lastPromptPreview: preview,
           lastActivityAt: new Date(
             ((typeof thread.updatedAt === "number" ? thread.updatedAt : undefined) ??
               (typeof thread.createdAt === "number" ? thread.createdAt : undefined) ??
               0) * 1000,
           ),
-          persistence: {
-            provider: CODEX_PROVIDER,
-            sessionId: threadId,
-            nativeHandle: threadId,
-            metadata: {
-              provider: CODEX_PROVIDER,
-              cwd,
-              title,
-              threadId,
-            },
-          },
-          timeline: buildCodexThreadListTimeline(thread),
         };
       });
-
-      return descriptors;
     } finally {
       await client.dispose();
     }
   }
 
-  async listModels(_options: ListModelsOptions): Promise<AgentModelDefinition[]> {
+  async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
+    return importSessionFromPersistence({
+      provider: CODEX_PROVIDER,
+      request: input,
+      context,
+      resumeSession: this.resumeSession.bind(this),
+    });
+  }
+
+  async fetchCatalog(_options: FetchCatalogOptions): Promise<ProviderCatalog> {
+    const models = await this.fetchModelsFromAppServer();
+    return { models, modes: CODEX_MODES };
+  }
+
+  private async fetchModelsFromAppServer(): Promise<AgentModelDefinition[]> {
     // Codex model/list is global to the app server in this flow; cwd/force are intentionally ignored.
     const child = await this.spawnAppServer();
     const client = new CodexAppServerClient(child, this.logger);
@@ -5587,6 +5587,33 @@ export class CodexAppServerAgentClient implements AgentClient {
     }
   }
 
+  async unarchiveNativeSession(handle: AgentPersistenceHandle): Promise<void> {
+    const threadId = handle.nativeHandle ?? handle.sessionId;
+    if (!threadId) return;
+
+    const child = await this.spawnAppServer();
+    const client = new CodexAppServerClient(child, this.logger);
+
+    try {
+      await client.request("initialize", buildCodexAppServerInitializeParams());
+      client.notify("initialized", {});
+      try {
+        await client.request("thread/unarchive", { threadId });
+      } catch (error) {
+        if (!isCodexAlreadyUnarchivedError(error, threadId)) {
+          throw error;
+        }
+        try {
+          await client.request("thread/read", { threadId });
+        } catch {
+          throw error;
+        }
+      }
+    } finally {
+      await client.dispose();
+    }
+  }
+
   async isAvailable(): Promise<boolean> {
     const launch = await resolveCodexLaunch(this.runtimeSettings);
     const availability = await checkCodexLaunchAvailable(launch);
@@ -5597,31 +5624,12 @@ export class CodexAppServerAgentClient implements AgentClient {
     try {
       const launch = await resolveCodexLaunch(this.runtimeSettings);
       const availability = await checkCodexLaunchAvailable(launch);
-      const available = availability.available;
       const entries: Array<{ label: string; value: string }> = [
+        ...(await buildCommandResolutionDiagnosticRows(launch, {
+          knownBinaryNames: ["codex"],
+        })),
         ...(await buildBinaryDiagnosticRows(launch, availability)),
       ];
-      let status = formatDiagnosticStatus(available);
-
-      if (!available) {
-        entries.push({ label: "Models", value: "Not checked" });
-      } else {
-        try {
-          const models = await this.listModels({ cwd: homedir(), force: false });
-          entries.push({ label: "Models", value: String(models.length) });
-        } catch (error) {
-          entries.push({
-            label: "Models",
-            value: `Error - ${toDiagnosticErrorMessage(error)}`,
-          });
-          status = formatDiagnosticStatus(available, {
-            source: "model fetch",
-            cause: error,
-          });
-        }
-      }
-
-      entries.push({ label: "Status", value: status });
 
       return {
         diagnostic: formatProviderDiagnostic("Codex", entries),

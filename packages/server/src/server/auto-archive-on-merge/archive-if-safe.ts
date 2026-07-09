@@ -3,8 +3,12 @@ import type { Logger } from "pino";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { DaemonConfigStore } from "../daemon-config-store.js";
-import { archivePaseoWorktree, killTerminalsUnderPath } from "../paseo-worktree-archive-service.js";
-import { isSameOrDescendantPath } from "../path-utils.js";
+import {
+  archiveByScope,
+  type ActiveWorkspaceRef,
+  killTerminalsForWorkspace,
+  resolveWorkspaceIdAtPath,
+} from "../workspace-archive-service.js";
 import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitServiceImpl,
@@ -15,13 +19,15 @@ import { isPaseoOwnedWorktreeCwd } from "../../utils/worktree.js";
 
 export interface AutoArchiveArchiveOptions {
   paseoHome: string;
-  worktreesRoot?: string;
+  paseoWorktreesBaseRoot?: string;
   daemonConfigStore: DaemonConfigStore;
   workspaceGitService: WorkspaceGitServiceImpl;
   github: GitHubService;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   terminalManager: TerminalManager;
+  findWorkspaceIdForCwd: (cwd: string) => Promise<string | null>;
+  listActiveWorkspaces: () => Promise<ActiveWorkspaceRef[]>;
   archiveWorkspaceRecord: (workspaceId: string) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
@@ -29,17 +35,17 @@ export interface AutoArchiveArchiveOptions {
 }
 
 export interface ArchiveIfSafeDependencies {
-  archivePaseoWorktree: typeof archivePaseoWorktree;
+  archiveByScope: typeof archiveByScope;
+  resolveWorkspaceIdAtPath: typeof resolveWorkspaceIdAtPath;
   isPaseoOwnedWorktreeCwd: typeof isPaseoOwnedWorktreeCwd;
-  killTerminalsUnderPath: typeof killTerminalsUnderPath;
-  isPathWithinRoot: typeof isSameOrDescendantPath;
+  killTerminalsForWorkspace: typeof killTerminalsForWorkspace;
 }
 
 const defaultDependencies: ArchiveIfSafeDependencies = {
-  archivePaseoWorktree,
+  archiveByScope,
+  resolveWorkspaceIdAtPath,
   isPaseoOwnedWorktreeCwd,
-  killTerminalsUnderPath,
-  isPathWithinRoot: isSameOrDescendantPath,
+  killTerminalsForWorkspace,
 };
 
 export async function archiveIfSafe(input: {
@@ -78,52 +84,62 @@ export async function archiveIfSafe(input: {
       return;
     }
 
-    if (snapshot.git.isDirty === true || snapshot.git.aheadOfOrigin === null) {
+    if (snapshot.git.isDirty === true) {
       return;
     }
-    if (snapshot.git.aheadOfOrigin > 0) {
+    if (typeof snapshot.git.aheadOfOrigin === "number" && snapshot.git.aheadOfOrigin > 0) {
       return;
     }
 
     const ownership = await deps.isPaseoOwnedWorktreeCwd(cwd, {
       paseoHome: options.paseoHome,
-      worktreesRoot: options.worktreesRoot,
+      worktreesRoot: options.paseoWorktreesBaseRoot,
     });
     if (!ownership.allowed) {
       return;
     }
 
     try {
-      await deps.archivePaseoWorktree(
+      const workspaceId = await deps.resolveWorkspaceIdAtPath(
+        {
+          findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
+          listActiveWorkspaces: options.listActiveWorkspaces,
+        },
+        cwd,
+      );
+      if (!workspaceId) {
+        log.warn({ cwd }, "Auto-archive could not resolve a workspace for cwd; skipping");
+        return;
+      }
+
+      await deps.archiveByScope(
         {
           paseoHome: options.paseoHome,
-          worktreesRoot: options.worktreesRoot,
+          paseoWorktreesBaseRoot: options.paseoWorktreesBaseRoot,
           github: options.github,
           workspaceGitService: options.workspaceGitService,
           agentManager: options.agentManager,
           agentStorage: options.agentStorage,
+          findWorkspaceIdForCwd: options.findWorkspaceIdForCwd,
+          listActiveWorkspaces: options.listActiveWorkspaces,
           archiveWorkspaceRecord: options.archiveWorkspaceRecord,
           emitWorkspaceUpdatesForWorkspaceIds: options.emitWorkspaceUpdatesForWorkspaceIds,
           markWorkspaceArchiving: options.markWorkspaceArchiving,
           clearWorkspaceArchiving: options.clearWorkspaceArchiving,
-          isPathWithinRoot: deps.isPathWithinRoot,
-          killTerminalsUnderPath: (rootPath) =>
-            deps.killTerminalsUnderPath(
+          killTerminalsForWorkspace: (workspaceIdToKill) =>
+            deps.killTerminalsForWorkspace(
               {
                 terminalManager: options.terminalManager,
-                isPathWithinRoot: deps.isPathWithinRoot,
-                killTrackedTerminal: () => {},
                 sessionLogger: log,
               },
-              rootPath,
+              workspaceIdToKill,
             ),
           sessionLogger: log,
         },
         {
-          targetPath: cwd,
+          scope: { kind: "workspace", workspaceId },
           repoRoot: ownership.repoRoot ?? null,
-          worktreesRoot: ownership.worktreeRoot,
-          worktreesBaseRoot: options.worktreesRoot,
+          paseoWorktreesBaseRoot: options.paseoWorktreesBaseRoot,
           requestId: "auto-archive-on-merge",
         },
       );

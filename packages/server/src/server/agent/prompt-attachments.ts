@@ -54,6 +54,14 @@ export function renderPromptAttachmentAsText(attachment: AgentAttachment): strin
       });
       return lines.join("\n");
     }
+    case "uploaded_file": {
+      return [
+        `Uploaded file: ${attachment.fileName}`,
+        `Path: ${attachment.path}`,
+        `MIME: ${attachment.mimeType}`,
+        `Size: ${attachment.size} bytes`,
+      ].join("\n");
+    }
     default:
       throw new Error("unreachable");
   }
@@ -72,13 +80,17 @@ export function buildAgentBranchNameSeed(
   const parts: string[] = [];
   const prompt = firstAgentContext.prompt?.trim();
   if (prompt) {
-    parts.push(prompt);
+    parts.push(["<user-prompt>", prompt, "</user-prompt>"].join("\n"));
   }
+  const renderedAttachments: string[] = [];
   for (const attachment of firstAgentContext.attachments ?? []) {
     const rendered = renderPromptAttachmentAsText(attachment).trim();
     if (rendered) {
-      parts.push(rendered);
+      renderedAttachments.push(rendered);
     }
+  }
+  if (renderedAttachments.length > 0) {
+    parts.push(["<attachments>", renderedAttachments.join("\n\n"), "</attachments>"].join("\n"));
   }
   return parts.length > 0 ? parts.join("\n\n") : undefined;
 }

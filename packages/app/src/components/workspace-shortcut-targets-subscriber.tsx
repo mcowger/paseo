@@ -1,9 +1,6 @@
 import { useEffect, useMemo } from "react";
-import {
-  useProjectNamesMap,
-  useStatusModeWorkspaceEntries,
-} from "@/hooks/use-status-mode-workspaces";
 import { useSidebarWorkspacesList } from "@/hooks/use-sidebar-workspaces-list";
+import { useStatusModeWorkspacePlacements } from "@/hooks/use-status-mode-workspaces";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sections-store";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
@@ -12,22 +9,16 @@ import {
   buildStatusSidebarShortcutModel,
 } from "@/utils/sidebar-shortcuts";
 
-export function WorkspaceShortcutTargetsSubscriber({
-  enabled,
-  serverId,
-}: {
-  enabled: boolean;
-  serverId: string | null;
-}) {
-  const { projects } = useSidebarWorkspacesList({ serverId, enabled });
-  const statusWorkspaces = useStatusModeWorkspaceEntries({
-    serverId: enabled ? serverId : null,
-    projects,
+export function WorkspaceShortcutTargetsSubscriber({ enabled }: { enabled: boolean }) {
+  const { workspacePlacements, projects, projectNamesByKey } = useSidebarWorkspacesList({
+    enabled,
   });
-  const projectNamesByKey = useProjectNamesMap(enabled ? serverId : null);
-  const groupMode = useSidebarViewStore((state) =>
-    enabled && serverId ? state.getGroupMode(serverId) : "project",
-  );
+  const groupMode = useSidebarViewStore((state) => state.groupMode);
+  const isStatusMode = enabled && groupMode === "status";
+  const statusWorkspacePlacements = useStatusModeWorkspacePlacements({
+    placements: workspacePlacements,
+    enabled: isStatusMode,
+  });
   const collapsedProjectKeys = useSidebarCollapsedSectionsStore(
     (state) => state.collapsedProjectKeys,
   );
@@ -41,7 +32,7 @@ export function WorkspaceShortcutTargetsSubscriber({
   const shortcutModel = useMemo(() => {
     if (groupMode === "status") {
       return buildStatusSidebarShortcutModel({
-        workspaces: statusWorkspaces,
+        workspaces: statusWorkspacePlacements,
         projectNamesByKey,
         collapsedStatusGroupKeys,
       });
@@ -57,17 +48,17 @@ export function WorkspaceShortcutTargetsSubscriber({
     groupMode,
     projectNamesByKey,
     projects,
-    statusWorkspaces,
+    statusWorkspacePlacements,
   ]);
 
   useEffect(() => {
-    if (!enabled || !serverId) {
+    if (!enabled) {
       setSidebarShortcutWorkspaceTargets([]);
       return;
     }
 
     setSidebarShortcutWorkspaceTargets(shortcutModel.shortcutTargets);
-  }, [enabled, serverId, setSidebarShortcutWorkspaceTargets, shortcutModel.shortcutTargets]);
+  }, [enabled, setSidebarShortcutWorkspaceTargets, shortcutModel.shortcutTargets]);
 
   useEffect(() => {
     return () => {

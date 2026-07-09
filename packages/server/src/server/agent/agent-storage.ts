@@ -14,10 +14,10 @@ const SERIALIZABLE_CONFIG_SCHEMA = z
     modeId: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
-    featureValues: z.record(z.unknown()).nullable().optional(),
-    extra: z.record(z.any()).nullable().optional(),
+    featureValues: z.record(z.string(), z.unknown()).nullable().optional(),
+    extra: z.record(z.string(), z.any()).nullable().optional(),
     systemPrompt: z.string().nullable().optional(),
-    mcpServers: z.record(z.any()).nullable().optional(),
+    mcpServers: z.record(z.string(), z.any()).nullable().optional(),
   })
   .nullable()
   .optional();
@@ -27,7 +27,7 @@ const PERSISTENCE_HANDLE_SCHEMA = z
     provider: z.string(),
     sessionId: z.string(),
     nativeHandle: z.any().optional(),
-    metadata: z.record(z.any()).optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
   })
   .nullable()
   .optional();
@@ -36,12 +36,13 @@ const STORED_AGENT_SCHEMA = z.object({
   id: z.string(),
   provider: z.string(),
   cwd: z.string(),
+  workspaceId: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastActivityAt: z.string().optional(),
   lastUserMessageAt: z.string().nullable().optional(),
   title: z.string().nullable().optional(),
-  labels: z.record(z.string()).default({}),
+  labels: z.record(z.string(), z.string()).default({}),
   lastStatus: AgentStatusSchema.default("closed"),
   lastModeId: z.string().nullable().optional(),
   config: SERIALIZABLE_CONFIG_SCHEMA,
@@ -52,7 +53,7 @@ const STORED_AGENT_SCHEMA = z.object({
       model: z.string().nullable().optional(),
       thinkingOptionId: z.string().nullable().optional(),
       modeId: z.string().nullable().optional(),
-      extra: z.record(z.unknown()).optional(),
+      extra: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
   features: z.array(AgentFeatureSchema).optional(),
@@ -191,23 +192,19 @@ export class AgentStorage {
 
   async applySnapshot(
     agent: ManagedAgent,
-    workspaceIdOrOptions?: string | { title?: string | null; internal?: boolean },
     options?: { title?: string | null; internal?: boolean },
   ): Promise<void> {
-    const nextOptions = typeof workspaceIdOrOptions === "string" ? options : workspaceIdOrOptions;
     await this.load();
     await this.waitForPendingWrite(agent.id);
     const existing = (await this.get(agent.id)) ?? null;
     const hasTitleOverride =
-      nextOptions !== undefined && Object.prototype.hasOwnProperty.call(nextOptions, "title");
+      options !== undefined && Object.prototype.hasOwnProperty.call(options, "title");
     const hasInternalOverride =
-      nextOptions !== undefined && Object.prototype.hasOwnProperty.call(nextOptions, "internal");
+      options !== undefined && Object.prototype.hasOwnProperty.call(options, "internal");
     const record = toStoredAgentRecord(agent, {
-      title: hasTitleOverride ? (nextOptions?.title ?? null) : (existing?.title ?? null),
+      title: hasTitleOverride ? (options?.title ?? null) : (existing?.title ?? null),
       createdAt: existing?.createdAt,
-      internal: hasInternalOverride
-        ? nextOptions?.internal
-        : (agent.internal ?? existing?.internal),
+      internal: hasInternalOverride ? options?.internal : (agent.internal ?? existing?.internal),
     });
 
     // Preserve soft-delete/archive status across snapshot flushes.
@@ -227,22 +224,6 @@ export class AgentStorage {
       throw new Error(`Agent ${agentId} not found`);
     }
     await this.upsert({ ...record, title });
-  }
-
-  async setGeneratedTitle(agentId: string, title: string): Promise<StoredAgentRecord> {
-    await this.load();
-    await this.waitForPendingWrite(agentId);
-    const record = this.cache.get(agentId) ?? null;
-    if (!record) {
-      throw new Error(`Agent ${agentId} not found`);
-    }
-    const nextRecord = {
-      ...record,
-      title,
-      updatedAt: new Date().toISOString(),
-    };
-    await this.queueRecordWrite(nextRecord);
-    return nextRecord;
   }
 
   async flush(): Promise<void> {
