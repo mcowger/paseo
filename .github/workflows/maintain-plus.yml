@@ -86,6 +86,12 @@ name: Maintain plus branch
 # packages keep the app's runtime import names working by using npm alias
 # dependencies for internal packages.
 #
+# Packages are published with the `plus` dist-tag and then also tagged as
+# `latest`.  The `latest` tag is intentionally present because mise's npm backend
+# asks npm for normal package metadata/version lists before installing even when
+# you pass an exact version; GitHub Packages can return empty metadata for
+# packages that do not have a `latest` tag.
+#
 # mise can then install the plus CLI as an npm-backed tool.  Because GitHub
 # Packages generally requires authentication, make sure your local npm config has
 # a PAT with `read:packages` permission before using mise:
@@ -507,7 +513,7 @@ jobs:
           ## mise
 
           This workflow also publishes an out-of-band CLI package to this fork's
-          GitHub Packages npm registry as:
+          GitHub Packages npm registry as both the `plus` and `latest` dist-tags:
 
           \`\`\`text
           @${{ github.repository_owner }}/paseo-cli@${{ steps.plus_version.outputs.version }}
@@ -622,14 +628,22 @@ jobs:
             packages/client \
             packages/server \
             packages/cli; do
+            package_name="$(node -p "require('./${package_dir}/package.json').name")"
             npm publish "./$package_dir" --tag "$PLUS_NPM_TAG" --ignore-scripts
+
+            # Also move `latest` to this plus build. mise's npm backend queries
+            # the normal package version metadata before installation, and
+            # GitHub Packages may return empty metadata for packages that only
+            # have a custom dist-tag such as `plus`.
+            npm dist-tag add "${package_name}@${PACKAGE_VERSION}" latest
           done
 
           {
             echo "## Published plus npm packages"
             echo
             echo "Registry: https://npm.pkg.github.com"
-            echo "Tag: \`${PLUS_NPM_TAG}\`"
+            echo "Primary tag: \`${PLUS_NPM_TAG}\`"
+            echo "mise compatibility tag: \`latest\`"
             echo "Version: \`${PACKAGE_VERSION}\`"
             echo
             echo "Install with mise after adding a GitHub Packages read token to your npm config:"
