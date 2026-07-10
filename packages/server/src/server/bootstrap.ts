@@ -151,6 +151,8 @@ import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./servi
 import { ScriptHealthMonitor } from "./script-health-monitor.js";
 import { createScriptStatusEmitter } from "./script-status-projection.js";
 import { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
+import { createWorkspaceScriptsService } from "./session/workspace-scripts/workspace-scripts-service.js";
+import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
 import {
   createManagedProcessRegistry,
   createSystemManagedProcessTable,
@@ -1104,6 +1106,26 @@ export async function createPaseoDaemon(
     archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
     emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
     workspaceRegistry,
+    workspaceScripts: createWorkspaceScriptsService({
+      serviceProxy,
+      scriptRuntimeStore,
+      terminalManager,
+      workspaceRegistry,
+      workspaceGitService,
+      getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+      getDaemonTcpHost: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
+      serviceProxyPublicBaseUrl,
+      resolveScriptHealth: (hostname) => scriptHealthMonitor.getHealthForHostname(hostname),
+      logger,
+      // MCP operations do not belong to one WebSocket session, so lifecycle
+      // status updates fan out to every connected client.
+      emit: (message) => {
+        for (const session of wsServer?.listActiveSessions() ?? []) {
+          session.emitServerMessage(message);
+        }
+      },
+      spawnWorkspaceScript,
+    }),
     markWorkspaceArchiving: markWorkspaceArchivingExternal,
     clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
     ensureWorkspaceForCreate: createAgentCommandDependencies.ensureWorkspaceForCreate,

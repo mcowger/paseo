@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pino } from "pino";
@@ -155,6 +155,54 @@ describe("emitStatusUpdate", () => {
     expect(emitted).toEqual([
       { type: "script_status_update", payload: { workspaceId: "ws-1", scripts: [] } },
     ]);
+  });
+});
+
+describe("stop", () => {
+  test("kills the supervised terminal and returns the stopped service metadata", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "workspace-scripts-"));
+    tempDirs.push(dir);
+    writeFileSync(
+      join(dir, "paseo.json"),
+      JSON.stringify({ scripts: { web: { type: "service", command: "npm run web", port: 3000 } } }),
+    );
+    const runtimeStore = new WorkspaceScriptRuntimeStore();
+    runtimeStore.set({
+      workspaceId: "ws-1",
+      scriptName: "web",
+      type: "service",
+      lifecycle: "running",
+      terminalId: "terminal-1",
+      exitCode: null,
+    });
+    const terminalManager = {
+      getTerminal: (terminalId: string) => (terminalId === "terminal-1" ? {} : undefined),
+      async killTerminalAndWait(terminalId: string) {
+        expect(terminalId).toBe("terminal-1");
+        runtimeStore.set({
+          workspaceId: "ws-1",
+          scriptName: "web",
+          type: "service",
+          lifecycle: "stopped",
+          terminalId,
+          exitCode: 143,
+        });
+      },
+    } as unknown as TerminalManager;
+    const { service } = buildService({
+      workspace: { workspaceId: "ws-1", cwd: dir } as PersistedWorkspaceRecord,
+      scriptRuntimeStore: runtimeStore,
+      terminalManager,
+    });
+
+    await expect(service.stop({ workspaceId: "ws-1", scriptName: "web" })).resolves.toMatchObject({
+      scriptName: "web",
+      type: "service",
+      port: 3000,
+      lifecycle: "stopped",
+      exitCode: 143,
+      terminalId: "terminal-1",
+    });
   });
 });
 

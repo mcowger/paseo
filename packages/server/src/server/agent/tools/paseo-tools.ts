@@ -10,6 +10,7 @@ import {
   AgentListItemPayloadSchema,
   AgentPermissionResponseSchema,
   AgentSnapshotPayloadSchema,
+  WorkspaceScriptPayloadSchema,
 } from "../../messages.js";
 import type { AgentListItemPayload } from "../../messages.js";
 import {
@@ -66,6 +67,7 @@ import {
 import type { GitHubService } from "../../../services/github-service.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type { WorkspaceRegistry } from "../../workspace-registry.js";
+import type { WorkspaceScriptsService } from "../../session/workspace-scripts/workspace-scripts-service.js";
 import { WorktreeRequestError } from "../../worktree-errors.js";
 import {
   archiveCommand,
@@ -101,6 +103,7 @@ export interface PaseoToolHostDependencies {
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "upsert">;
+  workspaceScripts?: Pick<WorkspaceScriptsService, "list" | "launch" | "stop">;
   markWorkspaceArchiving?: ArchiveDependencies["markWorkspaceArchiving"];
   clearWorkspaceArchiving?: ArchiveDependencies["clearWorkspaceArchiving"];
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
@@ -427,6 +430,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     agentManager,
     agentStorage,
     terminalManager,
+    workspaceScripts,
     scheduleService,
     providerSnapshotManager,
     callerAgentId,
@@ -1777,6 +1781,83 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           success: true,
           workspaceId,
           title,
+        }),
+      };
+    },
+  );
+
+  registerTool(
+    "list_workspace_scripts",
+    {
+      title: "List workspace scripts",
+      description:
+        "List configured workspace scripts and their lifecycle, service port, proxy URL, health, and terminal ID.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace ID whose configured scripts to list."),
+      },
+      outputSchema: {
+        scripts: z.array(WorkspaceScriptPayloadSchema),
+      },
+    },
+    async ({ workspaceId }) => {
+      if (!workspaceScripts) {
+        throw new Error("Workspace script management is not configured");
+      }
+      return {
+        content: [],
+        structuredContent: ensureValidJson({ scripts: await workspaceScripts.list(workspaceId) }),
+      };
+    },
+  );
+
+  registerTool(
+    "start_workspace_script",
+    {
+      title: "Start workspace script",
+      description:
+        "Start one configured workspace script through Paseo's managed workspace-script launcher.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace ID containing the configured script."),
+        scriptName: z.string().min(1).describe("Configured paseo.json script name to start."),
+      },
+      outputSchema: {
+        script: WorkspaceScriptPayloadSchema,
+      },
+    },
+    async ({ workspaceId, scriptName }) => {
+      if (!workspaceScripts) {
+        throw new Error("Workspace script management is not configured");
+      }
+      return {
+        content: [],
+        structuredContent: ensureValidJson({
+          script: await workspaceScripts.launch({ workspaceId, scriptName }),
+        }),
+      };
+    },
+  );
+
+  registerTool(
+    "stop_workspace_script",
+    {
+      title: "Stop workspace script",
+      description: "Stop a running workspace script through its supervised terminal lifecycle.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace ID containing the running script."),
+        scriptName: z.string().min(1).describe("Configured paseo.json script name to stop."),
+      },
+      outputSchema: {
+        script: WorkspaceScriptPayloadSchema,
+      },
+    },
+    async ({ workspaceId, scriptName }) => {
+      if (!workspaceScripts) {
+        throw new Error("Workspace script management is not configured");
+      }
+      return {
+        content: [],
+        structuredContent: ensureValidJson({
+          script: await workspaceScripts.stop({ workspaceId, scriptName }),
         }),
       };
     },
