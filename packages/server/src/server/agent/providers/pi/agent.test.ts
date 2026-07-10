@@ -1,15 +1,31 @@
-import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import pino from "pino";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 
 import type { AgentSessionConfig, AgentStreamEvent } from "../../agent-sdk-types.js";
+import type { ProviderRuntimeSettings } from "../../provider-launch-config.js";
 import { PiRpcAgentClient, PiRpcAgentSession, transformPiModels } from "./agent.js";
 import { FakePi } from "./test-utils/fake-pi.js";
 
-function createClient(pi = new FakePi()): PiRpcAgentClient {
+function createClient(
+  pi = new FakePi(),
+  runtimeSettings?: ProviderRuntimeSettings,
+): PiRpcAgentClient {
   return new PiRpcAgentClient({
     logger: pino({ level: "silent" }),
     runtime: pi,
+    runtimeSettings,
   });
 }
 
@@ -38,6 +54,12 @@ function readUtf8File(pathname: string): string {
   } finally {
     closeSync(fd);
   }
+}
+
+function createTestAgentDir(): string {
+  const agentDir = mkdtempSync(join(tmpdir(), "paseo-pi-agent-"));
+  onTestFinished(() => rmSync(agentDir, { recursive: true, force: true }));
+  return agentDir;
 }
 
 async function createSession(pi = new FakePi()): Promise<{
@@ -721,6 +743,7 @@ describe("PiRpcAgentClient", () => {
   });
 
   test("injects MCP servers through pi-mcp-adapter when the extension is loaded", async () => {
+    const agentDir = createTestAgentDir();
     const pi = new FakePi();
     pi.queueCommands([
       {
@@ -730,7 +753,7 @@ describe("PiRpcAgentClient", () => {
         sourceInfo: { source: "npm:pi-mcp-adapter" },
       },
     ]);
-    const client = createClient(pi);
+    const client = createClient(pi, { env: { PI_CODING_AGENT_DIR: agentDir } });
 
     const session = await client.createSession(
       createConfig({
@@ -791,6 +814,184 @@ describe("PiRpcAgentClient", () => {
 
     await session.close();
     expect(existsSync(configPath!)).toBe(false);
+  });
+
+  test("preserves the Pi global MCP config when injecting servers", async () => {
+    const agentDir = createTestAgentDir();
+    writeFileSync(
+      join(agentDir, "mcp.json"),
+      JSON.stringify({
+        settings: { toolPrefix: "none", disableProxyTool: true },
+        mcpServers: {
+          "brave-search": {
+            type: "streamable-http",
+            url: "https://example.com/mcp/brave",
+            directTools: ["brave_llm_context"],
+            excludeTools: ["brave_web_search"],
+          },
+        },
+      }),
+    );
+    const pi = new FakePi();
+    pi.queueCommands([
+      {
+        name: "mcp",
+        description: "Show MCP server status",
+        source: "extension",
+        sourceInfo: { source: "npm:pi-mcp-adapter" },
+      },
+    ]);
+    const client = createClient(pi, { env: { PI_CODING_AGENT_DIR: agentDir } });
+
+    const session = await client.createSession(
+      createConfig({
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+          },
+        },
+      }),
+    );
+
+    const configPath = pi.recordedLaunches[1]?.mcpConfigPath;
+    expect(configPath).toEqual(expect.any(String));
+    expect(JSON.parse(readUtf8File(configPath!))).toEqual({
+      settings: { toolPrefix: "none", disableProxyTool: true },
+      mcpServers: {
+        "brave-search": {
+          type: "streamable-http",
+          url: "https://example.com/mcp/brave",
+          directTools: ["brave_llm_context"],
+          excludeTools: ["brave_web_search"],
+        },
+        paseo: {
+          url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
+          auth: false,
+          oauth: false,
+        },
+      },
+    });
+
+    await session.close();
+  });
+
+  test("normalizes the mcp-servers alias when injecting servers", async () => {
+    const agentDir = createTestAgentDir();
+    writeFileSync(
+      join(agentDir, "mcp.json"),
+      JSON.stringify({
+        "mcp-servers": {
+          existing: { command: "existing-mcp" },
+        },
+      }),
+    );
+    const pi = new FakePi();
+    pi.queueCommands([
+      {
+        name: "mcp",
+        description: "Show MCP server status",
+        source: "extension",
+        sourceInfo: { source: "npm:pi-mcp-adapter" },
+      },
+    ]);
+    const client = createClient(pi, { env: { PI_CODING_AGENT_DIR: agentDir } });
+
+    const session = await client.createSession(
+      createConfig({
+        mcpServers: {
+          paseo: { type: "http", url: "http://127.0.0.1:6767/mcp/agents" },
+        },
+      }),
+    );
+
+    const configPath = pi.recordedLaunches[1]?.mcpConfigPath;
+    expect(configPath).toEqual(expect.any(String));
+    expect(JSON.parse(readUtf8File(configPath!))).toEqual({
+      mcpServers: {
+        existing: { command: "existing-mcp" },
+        paseo: {
+          url: "http://127.0.0.1:6767/mcp/agents",
+          auth: false,
+          oauth: false,
+        },
+      },
+    });
+
+    await session.close();
+  });
+
+  test("reports the path of a malformed Pi global MCP config", async () => {
+    const agentDir = createTestAgentDir();
+    const configPath = join(agentDir, "mcp.json");
+    writeFileSync(configPath, "{ invalid");
+    const pi = new FakePi();
+    pi.queueCommands([
+      {
+        name: "mcp",
+        description: "Show MCP server status",
+        source: "extension",
+        sourceInfo: { source: "npm:pi-mcp-adapter" },
+      },
+    ]);
+    const client = createClient(pi, { env: { PI_CODING_AGENT_DIR: agentDir } });
+
+    await expect(
+      client.createSession(
+        createConfig({
+          mcpServers: {
+            paseo: { type: "http", url: "http://127.0.0.1:6767/mcp/agents" },
+          },
+        }),
+      ),
+    ).rejects.toThrow(`Failed to parse Pi MCP config: ${configPath}`);
+  });
+
+  test("uses launch-context env when resuming with MCP servers", async () => {
+    const agentDir = createTestAgentDir();
+    writeFileSync(
+      join(agentDir, "mcp.json"),
+      JSON.stringify({ mcpServers: { existing: { command: "existing-mcp" } } }),
+    );
+    const pi = new FakePi();
+    pi.queueCommands([
+      {
+        name: "mcp",
+        description: "Show MCP server status",
+        source: "extension",
+        sourceInfo: { source: "npm:pi-mcp-adapter" },
+      },
+    ]);
+    const client = createClient(pi);
+
+    const session = await client.resumeSession(
+      {
+        provider: "pi",
+        sessionId: "pi-session-1",
+        nativeHandle: "/tmp/native-pi-session",
+      },
+      {
+        cwd: "/workspace/project",
+        mcpServers: {
+          paseo: { type: "http", url: "http://127.0.0.1:6767/mcp/agents" },
+        },
+      },
+      { env: { PI_CODING_AGENT_DIR: agentDir } },
+    );
+
+    expect(pi.recordedLaunches).toHaveLength(2);
+    expect(pi.recordedLaunches[0]?.env).toEqual({ PI_CODING_AGENT_DIR: agentDir });
+    expect(pi.recordedLaunches[1]?.env).toEqual({ PI_CODING_AGENT_DIR: agentDir });
+    const configPath = pi.recordedLaunches[1]?.mcpConfigPath;
+    expect(configPath).toEqual(expect.any(String));
+    expect(JSON.parse(readUtf8File(configPath!))).toMatchObject({
+      mcpServers: {
+        existing: { command: "existing-mcp" },
+        paseo: { url: "http://127.0.0.1:6767/mcp/agents" },
+      },
+    });
+
+    await session.close();
   });
 
   test("does not pass MCP config when pi-mcp-adapter is not loaded", async () => {
