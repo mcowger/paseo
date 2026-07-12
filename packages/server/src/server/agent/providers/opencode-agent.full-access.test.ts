@@ -90,7 +90,7 @@ describe("OpenCode auto_accept feature", () => {
     expect(modes.map((mode) => mode.id)).toEqual(["build", "paseo-custom"]);
   });
 
-  test("falls back to default OpenCode modes when discovery returns no modes", async () => {
+  test("returns no modes when discovery finds none, rather than fabricating defaults", async () => {
     const { runtime } = mockOpenCodeClient({ agents: [] });
 
     const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
@@ -103,7 +103,9 @@ describe("OpenCode auto_accept feature", () => {
       force: false,
     });
 
-    expect(modes.map((mode) => mode.id)).toEqual(["build", "plan"]);
+    // OpenCode users can rename/delete any agent, so a hardcoded fallback could
+    // validate a mode that doesn't exist. Empty is the honest answer.
+    expect(modes).toEqual([]);
   });
 
   test("lists auto accept as a provider feature", async () => {

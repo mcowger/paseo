@@ -646,11 +646,10 @@ function mergeOpenCodeModes(discoveredModes: AgentMode[]): AgentMode[] {
   );
   // When discovery returns results, trust them exactly — don't inject hardcoded
   // defaults that the user may have intentionally disabled in their OpenCode config.
-  // Fall back to DEFAULT_MODES only when discovery produced nothing.
-  if (filtered.length > 0) {
-    return sortOpenCodeModes(filtered);
-  }
-  return sortOpenCodeModes([...DEFAULT_MODES]);
+  // When discovery produced nothing, return empty rather than fabricating modes:
+  // OpenCode users can rename or delete any agent, so a hardcoded fallback can
+  // validate a mode that does not actually exist (failing later at prompt time).
+  return sortOpenCodeModes(filtered);
 }
 
 function sortOpenCodeModes(modes: AgentMode[]): AgentMode[] {
@@ -1645,7 +1644,11 @@ export class OpenCodeAgentClient implements AgentClient {
     );
 
     if (response.error || !response.data) {
-      return DEFAULT_MODES;
+      // Discovery failed — return an empty list rather than fabricating
+      // modes. OpenCode users can rename or delete any agent (including
+      // "build"/"plan"), so a hardcoded fallback can validate a mode that
+      // does not actually exist, which then fails at prompt time.
+      return [];
     }
 
     const discovered = response.data.filter(isSelectableOpenCodeAgent).map(mapOpenCodeAgentToMode);
