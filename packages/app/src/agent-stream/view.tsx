@@ -57,6 +57,8 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { ToolCallDetailsContent } from "@/components/tool-call-details";
 import { QuestionFormCard } from "@/components/question-form-card";
 import { ToolCallSheetProvider } from "@/components/tool-call-sheet";
+import { ToolCallGroup } from "@/components/tool-call-group";
+import { compactToolCallRuns } from "@/tool-calls/grouping";
 import { type AgentStreamRenderModel, buildAgentStreamRenderModel } from "./model";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
@@ -329,6 +331,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const { t } = useTranslation();
     const router = useRouter();
     const autoExpandReasoning = useSettings((settings) => settings.autoExpandReasoning);
+    const compactToolCalls = useSettings((settings) => settings.compactToolCalls);
     const viewportRef = useRef<StreamViewportHandle | null>(null);
     const isMobile = useIsCompactFormFactor();
     const streamRenderStrategy = useMemo(
@@ -341,6 +344,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
     const [isNearBottom, setIsNearBottom] = useState(true);
     const [expandedInlineToolCallIds, setExpandedInlineToolCallIds] = useState<Set<string>>(
+      new Set(),
+    );
+    const [expandedToolCallGroupIds, setExpandedToolCallGroupIds] = useState<Set<string>>(
       new Set(),
     );
     const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
@@ -391,6 +397,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     useEffect(() => {
       setIsNearBottom(true);
       setExpandedInlineToolCallIds(new Set());
+      setExpandedToolCallGroupIds(new Set());
     }, [agentId]);
 
     const handleInlinePathPress = useStableEvent(
@@ -537,16 +544,26 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     }
     const effectiveStreamItems = isActive ? streamItems : frozenStreamItemsRef.current;
     const effectiveStreamHead = isActive ? streamHead : frozenStreamHeadRef.current;
+    const compactedToolCalls = useMemo(
+      () =>
+        compactToolCallRuns({
+          tail: effectiveStreamItems,
+          head: effectiveStreamHead ?? EMPTY_STREAM_HEAD,
+          cwd: context.cwd,
+          enabled: compactToolCalls,
+        }),
+      [compactToolCalls, context.cwd, effectiveStreamHead, effectiveStreamItems],
+    );
 
     const baseRenderModel = useMemo(() => {
       return buildAgentStreamRenderModel({
         agentStatus: context.status,
-        tail: effectiveStreamItems,
-        head: effectiveStreamHead ?? EMPTY_STREAM_HEAD,
+        tail: compactedToolCalls.tail,
+        head: compactedToolCalls.head,
         platform: isWeb ? "web" : "native",
         isMobileBreakpoint: isMobile,
       });
-    }, [context.status, isMobile, effectiveStreamHead, effectiveStreamItems]);
+    }, [context.status, isMobile, compactedToolCalls.head, compactedToolCalls.tail]);
     const streamLayout = useMemo(
       () =>
         layoutStream({
@@ -598,6 +615,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       },
       [streamRenderStrategy],
     );
+
+    const setToolCallGroupExpanded = useCallback((groupId: string, expanded: boolean) => {
+      setExpandedToolCallGroupIds((previous) => {
+        const next = new Set(previous);
+        if (expanded) {
+          next.add(groupId);
+        } else {
+          next.delete(groupId);
+        }
+        return next;
+      });
+    }, []);
 
     const renderUserMessageItem = useCallback(
       (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "user_message" }>) => {
@@ -662,8 +691,12 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [autoExpandReasoning, setInlineDetailsExpanded],
     );
 
-    const renderToolCallItem = useCallback(
-      (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "tool_call" }>) => {
+    const renderSingleToolCallItem = useCallback(
+      (
+        layoutItem: StreamLayoutItem,
+        item: Extract<StreamItem, { kind: "tool_call" }>,
+        isLastInSequence = layoutItem.isLastInToolSequence,
+      ) => {
         const { payload } = item;
 
         if (payload.source === "agent") {
@@ -690,7 +723,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               detail={data.detail}
               cwd={context.cwd}
               metadata={data.metadata}
-              isLastInSequence={layoutItem.isLastInToolSequence}
+              isLastInSequence={isLastInSequence}
               onOpenFilePath={handleToolCallOpenFile}
             />
           );
@@ -705,12 +738,41 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             args={data.arguments}
             result={data.result}
             status={data.status}
-            isLastInSequence={layoutItem.isLastInToolSequence}
+            isLastInSequence={isLastInSequence}
             onOpenFilePath={handleToolCallOpenFile}
           />
         );
       },
       [context.cwd, setInlineDetailsExpanded, handleToolCallOpenFile],
+    );
+
+    const renderToolCallItem = useCallback(
+      (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "tool_call" }>) => {
+        const group = compactedToolCalls.groupsByHostId.get(item.id);
+        if (!group) {
+          return renderSingleToolCallItem(layoutItem, item);
+        }
+        const expanded = expandedToolCallGroupIds.has(group.id);
+        return (
+          <ToolCallGroup
+            group={group}
+            expanded={expanded}
+            onExpandedChange={setToolCallGroupExpanded}
+          >
+            {group.calls.map((call, index) => (
+              <React.Fragment key={call.id}>
+                {renderSingleToolCallItem(layoutItem, call, index === group.calls.length - 1)}
+              </React.Fragment>
+            ))}
+          </ToolCallGroup>
+        );
+      },
+      [
+        compactedToolCalls.groupsByHostId,
+        expandedToolCallGroupIds,
+        renderSingleToolCallItem,
+        setToolCallGroupExpanded,
+      ],
     );
 
     const renderStreamItemContent = useCallback(

@@ -1415,6 +1415,11 @@ export const es: TranslationResources = {
     input: "Aporte",
     output: "Producción",
   },
+  toolCallGroup: {
+    title: "Herramientas",
+    accessibilityLabel: "Herramientas, {{count}} llamadas",
+    failed: "{{count}} con error",
+  },
   renameModal: {
     rename: "Rebautizar",
     saving: "Guardando...",
@@ -1513,6 +1518,10 @@ export const es: TranslationResources = {
         label: "Siempre expandir razonamiento",
         description:
           "Mostrar los bloques de pensamiento y razonamiento del agente totalmente expandidos de forma predeterminada",
+      },
+      compactToolCalls: {
+        label: "Compactar llamadas a herramientas",
+        description: "Agrupar secuencias largas de llamadas en resúmenes expandibles",
       },
       language: {
         label: "Idioma",

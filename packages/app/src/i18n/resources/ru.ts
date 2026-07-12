@@ -1407,6 +1407,11 @@ export const ru: TranslationResources = {
     input: "Вход",
     output: "Выход",
   },
+  toolCallGroup: {
+    title: "Инструменты",
+    accessibilityLabel: "Инструменты, вызовов: {{count}}",
+    failed: "С ошибкой: {{count}}",
+  },
   renameModal: {
     rename: "Переименовать",
     saving: "Сохранение...",
@@ -1503,6 +1508,10 @@ export const ru: TranslationResources = {
         label: "Всегда разворачивать размышления",
         description:
           "По умолчанию показывать блоки размышлений и логики агента полностью развернутыми",
+      },
+      compactToolCalls: {
+        label: "Свернуть вызовы инструментов",
+        description: "Группировать длинные серии вызовов в разворачиваемые сводки",
       },
       language: {
         label: "Язык",

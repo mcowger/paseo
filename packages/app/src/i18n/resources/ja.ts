@@ -1393,6 +1393,11 @@ export const ja: TranslationResources = {
     input: "入力",
     output: "出力",
   },
+  toolCallGroup: {
+    title: "ツール",
+    accessibilityLabel: "ツール、{{count}}件の呼び出し",
+    failed: "{{count}}件失敗",
+  },
   renameModal: {
     rename: "名前を変更",
     saving: "保存中...",
@@ -1488,6 +1493,10 @@ export const ja: TranslationResources = {
       autoExpandReasoning: {
         label: "常に思考プロセスを展開",
         description: "デフォルトでAIのエージェント思考・推論ブロックを完全に展開して表示します",
+      },
+      compactToolCalls: {
+        label: "ツール呼び出しをまとめる",
+        description: "長いツール呼び出しの連続を展開可能な概要にまとめます",
       },
       language: {
         label: "言語",

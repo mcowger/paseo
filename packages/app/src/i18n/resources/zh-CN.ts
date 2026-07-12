@@ -1360,6 +1360,11 @@ export const zhCN: TranslationResources = {
     input: "输入",
     output: "输出",
   },
+  toolCallGroup: {
+    title: "工具",
+    accessibilityLabel: "工具，{{count}} 次调用",
+    failed: "{{count}} 次失败",
+  },
   renameModal: {
     rename: "重命名",
     saving: "正在保存...",
@@ -1455,6 +1460,10 @@ export const zhCN: TranslationResources = {
       autoExpandReasoning: {
         label: "始终展开推理过程",
         description: "默认情况下完全展开 AI 的思考和推理过程",
+      },
+      compactToolCalls: {
+        label: "压缩工具调用",
+        description: "将较长的连续工具调用分组为可展开的摘要",
       },
       language: {
         label: "语言",

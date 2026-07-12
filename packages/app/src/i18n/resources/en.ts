@@ -1384,6 +1384,11 @@ export const en = {
     input: "Input",
     output: "Output",
   },
+  toolCallGroup: {
+    title: "Tools",
+    accessibilityLabel: "Tools, {{count}} calls",
+    failed: "{{count}} failed",
+  },
   renameModal: {
     rename: "Rename",
     saving: "Saving...",
@@ -1479,6 +1484,10 @@ export const en = {
       autoExpandReasoning: {
         label: "Always expand reasoning",
         description: "Show agent thinking and chain-of-thought blocks fully expanded by default",
+      },
+      compactToolCalls: {
+        label: "Compact tool calls",
+        description: "Group long runs of tool calls into expandable summaries",
       },
       language: {
         label: "Language",
