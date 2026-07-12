@@ -549,10 +549,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         compactToolCallRuns({
           tail: effectiveStreamItems,
           head: effectiveStreamHead ?? EMPTY_STREAM_HEAD,
-          cwd: context.cwd,
           enabled: compactToolCalls,
         }),
-      [compactToolCalls, context.cwd, effectiveStreamHead, effectiveStreamItems],
+      [compactToolCalls, effectiveStreamHead, effectiveStreamItems],
     );
 
     const baseRenderModel = useMemo(() => {
