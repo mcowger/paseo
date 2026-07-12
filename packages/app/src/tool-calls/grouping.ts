@@ -63,6 +63,11 @@ interface ToolCallDescriptor {
   metadata?: Record<string, unknown>;
 }
 
+interface ResourceSummary {
+  key: string;
+  label: string;
+}
+
 function describeToolCall(item: ToolCallItem): ToolCallDescriptor {
   if (item.payload.source === "agent") {
     const { data } = item.payload;
@@ -104,17 +109,21 @@ function isDirectSearchToolName(name: string): boolean {
   return DIRECT_SEARCH_TOOL_NAMES.has(name);
 }
 
-function resourceForDetail(detail: ToolCallDetail): string | null {
+function resourceForDetail(detail: ToolCallDetail): ResourceSummary | null {
   if (detail.type === "read" || detail.type === "edit" || detail.type === "write") {
-    return getFileNameFromPath(detail.filePath) ?? detail.filePath;
+    return {
+      key: detail.filePath,
+      label: getFileNameFromPath(detail.filePath) ?? detail.filePath,
+    };
   }
   if (detail.type !== "fetch") {
     return null;
   }
   try {
-    return new URL(detail.url).hostname || detail.url;
+    const hostname = new URL(detail.url).hostname || detail.url;
+    return { key: hostname, label: hostname };
   } catch {
-    return detail.url;
+    return { key: detail.url, label: detail.url };
   }
 }
 
@@ -154,6 +163,7 @@ function buildCompactToolCallGroup(calls: ToolCallItem[]) {
   const editedFiles = new Set<string>();
   const readFiles = new Set<string>();
   const categories = new Map<string, ToolCallCategorySummary>();
+  const categoryResourceKeys = new Map<string, Set<string>>();
   let failedCount = 0;
   let isRunning = false;
   let commandCount = 0;
@@ -195,8 +205,16 @@ function buildCompactToolCallGroup(calls: ToolCallItem[]) {
     category.failedCount += isFailed ? 1 : 0;
     category.runningCount += isCallRunning ? 1 : 0;
     const resource = resourceForDetail(descriptor.detail);
-    if (resource && !category.resources.includes(resource)) {
-      category.resources.push(resource);
+    if (resource) {
+      let resourceKeys = categoryResourceKeys.get(identity.key);
+      if (!resourceKeys) {
+        resourceKeys = new Set();
+        categoryResourceKeys.set(identity.key, resourceKeys);
+      }
+      if (!resourceKeys.has(resource.key)) {
+        resourceKeys.add(resource.key);
+        category.resources.push(resource.label);
+      }
     }
 
     if (isPaseoToolName(descriptor.name) || isDirectPaseoToolName(normalizedName)) {
@@ -265,13 +283,18 @@ export function compactToolCallRuns(input: CompactToolCallRunsInput): CompactToo
   };
   const flushRun = () => {
     if (pendingRun.length >= MIN_COMPACT_TOOL_CALLS) {
-      const host = pendingRun.at(-1);
-      if (!host) {
+      const first = pendingRun[0];
+      const latest = pendingRun.at(-1);
+      if (!first || !latest) {
         throw new Error("Cannot compact an empty tool call run");
       }
       const calls = pendingRun.map(({ item }) => item as ToolCallItem);
-      append(host);
-      groupsByHostId.set(host.item.id, buildCompactToolCallGroup(calls));
+      const stableHost: TaggedStreamItem = {
+        segment: latest.segment,
+        item: { ...latest.item, id: first.item.id },
+      };
+      append(stableHost);
+      groupsByHostId.set(stableHost.item.id, buildCompactToolCallGroup(calls));
     } else {
       for (const entry of pendingRun) {
         append(entry);

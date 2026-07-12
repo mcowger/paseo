@@ -50,7 +50,7 @@ describe("compactToolCallRuns", () => {
     expect(result.groupsByHostId.size).toBe(0);
   });
 
-  it("replaces four contiguous calls with their final call as a stable host", () => {
+  it("replaces four contiguous calls with a stable first-call host and latest timestamp", () => {
     const calls = [
       toolCall("1", { type: "shell", command: "one" }),
       toolCall("2", { type: "shell", command: "two" }),
@@ -60,11 +60,12 @@ describe("compactToolCallRuns", () => {
 
     const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
 
-    expect(result.tail).toEqual([calls[3]]);
+    expect(result.tail).toHaveLength(1);
+    expect(result.tail[0]).toMatchObject({ id: "1", timestamp: calls[3]?.timestamp });
     expect(result.head).toEqual([]);
-    expect(result.groupsByHostId.get("4")?.id).toBe("1");
-    expect(result.groupsByHostId.get("4")?.calls).toEqual(calls);
-    expect(result.groupsByHostId.get("4")).toMatchObject({
+    expect(result.groupsByHostId.get("1")?.id).toBe("1");
+    expect(result.groupsByHostId.get("1")?.calls).toEqual(calls);
+    expect(result.groupsByHostId.get("1")).toMatchObject({
       editedFileCount: 1,
       commandCount: 2,
       readFileCount: 1,
@@ -82,7 +83,8 @@ describe("compactToolCallRuns", () => {
       head: [],
       enabled: true,
     });
-    expect(updated.groupsByHostId.get("5")?.id).toBe("1");
+    expect(updated.tail[0]).toMatchObject({ id: "1", timestamp: nextCall.timestamp });
+    expect(updated.groupsByHostId.get("1")?.id).toBe("1");
   });
 
   it("does not compact short runs and stops at visible content boundaries", () => {
@@ -105,8 +107,9 @@ describe("compactToolCallRuns", () => {
       enabled: true,
     });
 
-    expect(result.tail).toEqual([...firstRun, boundary, secondRun[3]]);
-    expect([...result.groupsByHostId.keys()]).toEqual(["7"]);
+    expect(result.tail.slice(0, -1)).toEqual([...firstRun, boundary]);
+    expect(result.tail.at(-1)).toMatchObject({ id: "4", timestamp: secondRun[3]?.timestamp });
+    expect([...result.groupsByHostId.keys()]).toEqual(["4"]);
   });
 
   it("forms one group across the history and live-head boundary", () => {
@@ -123,9 +126,10 @@ describe("compactToolCallRuns", () => {
     const result = compactToolCallRuns({ tail, head, enabled: true });
 
     expect(result.tail).toEqual([tail[0]]);
-    expect(result.head).toEqual([head[1]]);
-    expect(result.groupsByHostId.get("4")?.calls).toEqual([...tail.slice(1), ...head]);
-    expect(result.groupsByHostId.get("4")?.isRunning).toBe(true);
+    expect(result.head).toHaveLength(1);
+    expect(result.head[0]).toMatchObject({ id: "1", timestamp: head[1]?.timestamp });
+    expect(result.groupsByHostId.get("1")?.calls).toEqual([...tail.slice(1), ...head]);
+    expect(result.groupsByHostId.get("1")?.isRunning).toBe(true);
   });
 
   it("separates reads and searches from other tools", () => {
@@ -142,7 +146,7 @@ describe("compactToolCallRuns", () => {
     ];
 
     const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
-    const group = result.groupsByHostId.get("5");
+    const group = result.groupsByHostId.get("1");
 
     expect(group).toMatchObject({
       failedCount: 1,
@@ -167,7 +171,7 @@ describe("compactToolCallRuns", () => {
 
     const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
 
-    expect(result.groupsByHostId.get("6")).toMatchObject({
+    expect(result.groupsByHostId.get("1")).toMatchObject({
       editedFileCount: 2,
       commandCount: 2,
       readFileCount: 1,
@@ -189,7 +193,7 @@ describe("compactToolCallRuns", () => {
 
     const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
 
-    expect(result.groupsByHostId.get("4")).toMatchObject({
+    expect(result.groupsByHostId.get("1")).toMatchObject({
       otherToolCount: 2,
       paseoCallCount: 2,
     });
@@ -207,7 +211,7 @@ describe("compactToolCallRuns", () => {
 
     const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
 
-    expect(result.groupsByHostId.get("5")).toMatchObject({
+    expect(result.groupsByHostId.get("1")).toMatchObject({
       searchCount: 2,
       otherToolCount: 0,
       paseoCallCount: 3,
@@ -231,7 +235,29 @@ describe("compactToolCallRuns", () => {
       enabled: true,
     });
 
-    expect(result.tail).toEqual([shellCalls[3], plan, speak]);
-    expect(result.groupsByHostId.get("4")?.calls).toEqual(shellCalls);
+    expect(result.tail[0]).toMatchObject({ id: "1", timestamp: shellCalls[3]?.timestamp });
+    expect(result.tail.slice(1)).toEqual([plan, speak]);
+    expect(result.groupsByHostId.get("1")?.calls).toEqual(shellCalls);
+  });
+
+  it("deduplicates file resources by full path while displaying basenames", () => {
+    const calls = [
+      toolCall("1", { type: "read", filePath: "/repo/src/index.ts" }),
+      toolCall("2", { type: "read", filePath: "/repo/tests/index.ts" }),
+      toolCall("3", { type: "read", filePath: "/repo/src/other.ts" }),
+      toolCall("4", { type: "read", filePath: "/repo/src/index.ts" }),
+    ];
+
+    const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
+
+    expect(result.groupsByHostId.get("1")).toMatchObject({
+      readFileCount: 3,
+      categories: [
+        {
+          key: "read",
+          resources: ["index.ts", "index.ts", "other.ts"],
+        },
+      ],
+    });
   });
 });
