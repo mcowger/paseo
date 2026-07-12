@@ -9,12 +9,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { ChevronRight, TriangleAlert, Wrench } from "lucide-react-native";
 import { StyleSheet } from "react-native-unistyles";
-import { useIsCompactFormFactor } from "@/constants/layout";
-import type {
-  CompactToolCallGroup as CompactToolCallGroupModel,
-  ToolCallCategorySummary,
-} from "@/tool-calls/grouping";
-import { componentForToolCallIcon } from "@/utils/tool-call-icon";
+import type { CompactToolCallGroup as CompactToolCallGroupModel } from "@/tool-calls/grouping";
 
 interface ToolCallGroupProps {
   group: CompactToolCallGroupModel;
@@ -23,64 +18,27 @@ interface ToolCallGroupProps {
   children: ReactNode;
 }
 
-function CategoryStatus({ category }: { category: ToolCallCategorySummary }) {
-  const { t } = useTranslation();
-  if (category.failedCount > 0) {
-    return (
-      <View style={styles.categoryStatus}>
-        <TriangleAlert size={12} color={styles.error.color} />
-        <Text style={styles.error}>
-          {t("toolCallGroup.failed", { count: category.failedCount })}
-        </Text>
-      </View>
-    );
-  }
-  if (category.runningCount > 0) {
-    return <ActivityIndicator size={12} color={styles.muted.color} />;
-  }
-  return null;
-}
-
 function GroupHeaderIcon({ group }: { group: CompactToolCallGroupModel }) {
   if (group.failedCount > 0) {
-    return <TriangleAlert size={12} color={styles.error.color} />;
+    return <TriangleAlert size={11} color={styles.error.color} />;
   }
   if (group.isRunning) {
-    return <ActivityIndicator size={12} color={styles.foreground.color} />;
+    return <ActivityIndicator size={11} color={styles.foreground.color} />;
   }
-  return <Wrench size={12} color={styles.muted.color} />;
+  return <Wrench size={11} color={styles.muted.color} />;
 }
 
-function CategoryRow({
-  category,
-  resourceLimit,
-}: {
-  category: ToolCallCategorySummary;
-  resourceLimit: number;
-}) {
-  const Icon = componentForToolCallIcon(category.iconName);
-  const visibleResources = category.resources.slice(0, resourceLimit);
-  const hiddenResourceCount = category.resources.length - visibleResources.length;
-  const resourceText = [
-    ...visibleResources,
-    ...(hiddenResourceCount > 0 ? [`+${hiddenResourceCount}`] : []),
-  ].join(", ");
-
-  return (
-    <View style={styles.categoryRow}>
-      <View style={styles.categoryIcon}>
-        <Icon size={12} color={styles.muted.color} />
-      </View>
-      <Text style={styles.categoryLabel}>{category.label}</Text>
-      <Text style={styles.categoryCount}>×{category.callCount}</Text>
-      <CategoryStatus category={category} />
-      {resourceText ? (
-        <Text style={styles.resources} numberOfLines={1}>
-          {resourceText}
-        </Text>
-      ) : null}
-    </View>
-  );
+function joinSummaryParts(parts: string[], conjunction: string): string {
+  let joined: string;
+  if (parts.length === 1) {
+    joined = parts[0] ?? "";
+  } else if (parts.length === 2) {
+    joined = `${parts[0]} ${conjunction} ${parts[1]}`;
+  } else {
+    joined = `${parts.slice(0, -1).join(", ")}, ${conjunction} ${parts.at(-1)}`;
+  }
+  const firstCharacter = joined[0];
+  return firstCharacter ? `${firstCharacter.toLocaleUpperCase()}${joined.slice(1)}` : joined;
 }
 
 export const ToolCallGroup = memo(function ToolCallGroup({
@@ -90,8 +48,6 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   children,
 }: ToolCallGroupProps) {
   const { t } = useTranslation();
-  const isCompact = useIsCompactFormFactor();
-  const resourceLimit = isCompact ? 2 : 3;
   const handlePress = useCallback(
     () => onExpandedChange(group.id, !expanded),
     [expanded, group.id, onExpandedChange],
@@ -104,6 +60,65 @@ export const ToolCallGroup = memo(function ToolCallGroup({
     ],
     [expanded],
   );
+  const summary = useMemo(() => {
+    const parts: string[] = [];
+    if (group.editedFileCount > 0) {
+      parts.push(
+        t(
+          group.editedFileCount === 1
+            ? "toolCallGroup.editedFiles.one"
+            : "toolCallGroup.editedFiles.other",
+          { count: group.editedFileCount },
+        ),
+      );
+    }
+    if (group.commandCount > 0) {
+      parts.push(
+        t(
+          group.commandCount === 1 ? "toolCallGroup.commands.one" : "toolCallGroup.commands.other",
+          { count: group.commandCount },
+        ),
+      );
+    }
+    if (group.readFileCount > 0) {
+      parts.push(
+        t(
+          group.readFileCount === 1
+            ? "toolCallGroup.readFiles.one"
+            : "toolCallGroup.readFiles.other",
+          { count: group.readFileCount },
+        ),
+      );
+    }
+    if (group.searchCount > 0) {
+      parts.push(
+        t(group.searchCount === 1 ? "toolCallGroup.searches.one" : "toolCallGroup.searches.other", {
+          count: group.searchCount,
+        }),
+      );
+    }
+    if (group.otherToolCount > 0) {
+      parts.push(
+        t(
+          group.otherToolCount === 1
+            ? "toolCallGroup.otherTools.one"
+            : "toolCallGroup.otherTools.other",
+          { count: group.otherToolCount },
+        ),
+      );
+    }
+    if (group.paseoCallCount > 0) {
+      parts.push(
+        t(
+          group.paseoCallCount === 1
+            ? "toolCallGroup.paseoCalls.one"
+            : "toolCallGroup.paseoCalls.other",
+          { count: group.paseoCallCount },
+        ),
+      );
+    }
+    return joinSummaryParts(parts, t("toolCallGroup.and"));
+  }, [group, t]);
 
   return (
     <View style={styles.container} testID="tool-call-group">
@@ -111,35 +126,28 @@ export const ToolCallGroup = memo(function ToolCallGroup({
         onPress={handlePress}
         accessibilityRole="button"
         accessibilityState={accessibilityState}
-        accessibilityLabel={t("toolCallGroup.accessibilityLabel", { count: group.callCount })}
+        accessibilityLabel={summary}
         style={headerStyle}
       >
         <View style={styles.headerIcon}>
           <GroupHeaderIcon group={group} />
         </View>
-        <Text style={styles.title}>{t("toolCallGroup.title")}</Text>
-        <Text style={styles.callCount}>×{group.callCount}</Text>
+        <Text style={styles.summary} numberOfLines={1}>
+          {summary}
+        </Text>
         {group.failedCount > 0 ? (
           <Text style={styles.error}>
             {t("toolCallGroup.failed", { count: group.failedCount })}
           </Text>
         ) : null}
         <ChevronRight
-          size={14}
+          size={12}
           color={styles.muted.color}
           style={expanded ? styles.chevronExpanded : undefined}
         />
       </Pressable>
 
-      {expanded ? (
-        <View style={styles.expandedCalls}>{children}</View>
-      ) : (
-        <View style={styles.categories}>
-          {group.categories.map((category) => (
-            <CategoryRow key={category.key} category={category} resourceLimit={resourceLimit} />
-          ))}
-        </View>
-      )}
+      {expanded ? <View style={styles.expandedCalls}>{children}</View> : null}
     </View>
   );
 });
@@ -149,7 +157,7 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: -theme.spacing[3],
   },
   header: {
-    minHeight: 30,
+    minHeight: 26,
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1],
@@ -161,58 +169,21 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface1,
   },
   headerIcon: {
-    width: 22,
-    height: 22,
+    width: 18,
+    height: 18,
     alignItems: "center",
     justifyContent: "center",
   },
-  title: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.normal,
-  },
-  callCount: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
-  },
-  categories: {
-    gap: theme.spacing[1],
-    paddingLeft: theme.spacing[8],
-    paddingRight: theme.spacing[2],
-    paddingTop: theme.spacing[1],
-  },
-  categoryRow: {
-    minHeight: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-  },
-  categoryIcon: {
-    width: 14,
-    alignItems: "center",
-  },
-  categoryLabel: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
-    minWidth: 64,
-  },
-  categoryCount: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
-  },
-  categoryStatus: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-  },
-  resources: {
+  summary: {
     flex: 1,
     minWidth: 0,
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.normal,
   },
   expandedCalls: {
     paddingTop: theme.spacing[1],
+    marginHorizontal: theme.spacing[3],
   },
   chevronExpanded: {
     transform: [{ rotate: "90deg" }],

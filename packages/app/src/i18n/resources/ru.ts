@@ -1410,8 +1410,31 @@ export const ru: TranslationResources = {
     output: "Выход",
   },
   toolCallGroup: {
-    title: "Инструменты",
-    accessibilityLabel: "Инструменты, вызовов: {{count}}",
+    editedFiles: {
+      one: "изменён {{count}} файл",
+      other: "изменено {{count}} файлов",
+    },
+    commands: {
+      one: "выполнена {{count}} команда",
+      other: "выполнено {{count}} команд",
+    },
+    readFiles: {
+      one: "прочитан {{count}} файл",
+      other: "прочитано {{count}} файлов",
+    },
+    searches: {
+      one: "выполнен {{count}} поиск",
+      other: "выполнено {{count}} поисков",
+    },
+    otherTools: {
+      one: "использован {{count}} другой инструмент",
+      other: "использовано {{count}} других инструментов",
+    },
+    paseoCalls: {
+      one: "Paseo вызван {{count}} раз",
+      other: "Paseo вызван {{count}} раз",
+    },
+    and: "и",
     failed: "С ошибкой: {{count}}",
   },
   renameModal: {

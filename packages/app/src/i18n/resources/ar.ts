@@ -1379,8 +1379,31 @@ export const ar: TranslationResources = {
     output: "الإخراج",
   },
   toolCallGroup: {
-    title: "الأدوات",
-    accessibilityLabel: "الأدوات، {{count}} استدعاءات",
+    editedFiles: {
+      one: "حرّر {{count}} ملفًا",
+      other: "حرّر {{count}} ملفات",
+    },
+    commands: {
+      one: "شغّل {{count}} أمرًا",
+      other: "شغّل {{count}} أوامر",
+    },
+    readFiles: {
+      one: "قرأ {{count}} ملفًا",
+      other: "قرأ {{count}} ملفات",
+    },
+    searches: {
+      one: "بحث {{count}} مرة",
+      other: "بحث {{count}} مرات",
+    },
+    otherTools: {
+      one: "استخدم {{count}} أداة أخرى",
+      other: "استخدم {{count}} أدوات أخرى",
+    },
+    paseoCalls: {
+      one: "استدعى Paseo {{count}} مرة",
+      other: "استدعى Paseo {{count}} مرات",
+    },
+    and: "و",
     failed: "فشل {{count}}",
   },
   renameModal: {

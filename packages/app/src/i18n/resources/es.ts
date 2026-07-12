@@ -1418,8 +1418,31 @@ export const es: TranslationResources = {
     output: "Producción",
   },
   toolCallGroup: {
-    title: "Herramientas",
-    accessibilityLabel: "Herramientas, {{count}} llamadas",
+    editedFiles: {
+      one: "editó {{count}} archivo",
+      other: "editó {{count}} archivos",
+    },
+    commands: {
+      one: "ejecutó {{count}} comando",
+      other: "ejecutó {{count}} comandos",
+    },
+    readFiles: {
+      one: "leyó {{count}} archivo",
+      other: "leyó {{count}} archivos",
+    },
+    searches: {
+      one: "buscó {{count}} vez",
+      other: "buscó {{count}} veces",
+    },
+    otherTools: {
+      one: "usó {{count}} herramienta adicional",
+      other: "usó {{count}} herramientas adicionales",
+    },
+    paseoCalls: {
+      one: "llamó a Paseo {{count}} vez",
+      other: "llamó a Paseo {{count}} veces",
+    },
+    and: "y",
     failed: "{{count}} con error",
   },
   renameModal: {
