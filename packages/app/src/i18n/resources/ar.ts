@@ -1377,6 +1377,8 @@ export const ar: TranslationResources = {
     output: "الإخراج",
   },
   toolCallGroup: {
+    title: "الأدوات",
+    accessibilityLabel: "الأدوات، {{count}} استدعاءات",
     editedFiles: {
       one: "حرّر {{count}} ملفًا",
       other: "حرّر {{count}} ملفات",
@@ -1501,9 +1503,15 @@ export const ar: TranslationResources = {
         label: "عرض التفكير دائماً",
         description: "إظهار تفكير الوكيل وخطوات الاستدلال بشكل كامل بشكل افتراضي",
       },
-      compactToolCalls: {
-        label: "ضغط استدعاءات الأدوات",
-        description: "تجميع السلاسل الطويلة من استدعاءات الأدوات في ملخصات قابلة للتوسيع",
+      toolCallDetail: {
+        label: "تفاصيل استدعاءات الأدوات",
+        description: "كيفية ظهور نشاط الأدوات في الخط الزمني للوكيل",
+        accessibilityLabel: "حدد مستوى تفاصيل الأدوات ({{value}})",
+        options: {
+          overview: "نظرة عامة",
+          concise: "موجز",
+          detailed: "مفصل",
+        },
       },
       language: {
         label: "لغة",

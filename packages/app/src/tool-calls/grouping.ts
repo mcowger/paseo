@@ -1,6 +1,9 @@
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { isPaseoToolName } from "@getpaseo/protocol/tool-name-normalization";
+import { getFileNameFromPath } from "@/attachments/utils";
 import type { StreamItem, ToolCallItem } from "@/types/stream";
+import { buildToolCallDisplayModel } from "@/utils/tool-call-display";
+import { resolveToolCallIconName, type ToolCallIcon } from "@/utils/tool-call-icon-name";
 
 export const MIN_COMPACT_TOOL_CALLS = 4;
 
@@ -10,9 +13,20 @@ const DIRECT_SEARCH_TOOL_NAMES = new Set([
   "brave-search_brave_llm_context",
 ]);
 
+export interface ToolCallCategorySummary {
+  key: string;
+  label: string;
+  iconName: ToolCallIcon;
+  callCount: number;
+  failedCount: number;
+  runningCount: number;
+  resources: string[];
+}
+
 export interface CompactToolCallGroup {
   id: string;
   calls: ToolCallItem[];
+  callCount: number;
   failedCount: number;
   isRunning: boolean;
   editedFileCount: number;
@@ -21,6 +35,7 @@ export interface CompactToolCallGroup {
   searchCount: number;
   otherToolCount: number;
   paseoCallCount: number;
+  categories: ToolCallCategorySummary[];
 }
 
 export interface CompactToolCallRunsResult {
@@ -44,6 +59,8 @@ interface ToolCallDescriptor {
   detail: ToolCallDetail;
   name: string;
   status: "running" | "completed" | "failed" | "canceled";
+  error: unknown;
+  metadata?: Record<string, unknown>;
 }
 
 function describeToolCall(item: ToolCallItem): ToolCallDescriptor {
@@ -53,6 +70,8 @@ function describeToolCall(item: ToolCallItem): ToolCallDescriptor {
       detail: data.detail,
       name: data.name,
       status: data.status,
+      error: data.error,
+      metadata: data.metadata,
     };
   }
 
@@ -65,6 +84,7 @@ function describeToolCall(item: ToolCallItem): ToolCallDescriptor {
     },
     name: data.toolName,
     status: data.status === "executing" ? "running" : data.status,
+    error: data.error,
   };
 }
 
@@ -76,9 +96,64 @@ function isCompactableToolCall(item: StreamItem): item is ToolCallItem {
   return descriptor.detail.type !== "plan" && descriptor.name.trim().toLowerCase() !== "speak";
 }
 
+function isDirectPaseoToolName(name: string): boolean {
+  return name.startsWith(DIRECT_PASEO_TOOL_PREFIX);
+}
+
+function isDirectSearchToolName(name: string): boolean {
+  return DIRECT_SEARCH_TOOL_NAMES.has(name);
+}
+
+function resourceForDetail(detail: ToolCallDetail): string | null {
+  if (detail.type === "read" || detail.type === "edit" || detail.type === "write") {
+    return getFileNameFromPath(detail.filePath) ?? detail.filePath;
+  }
+  if (detail.type !== "fetch") {
+    return null;
+  }
+  try {
+    return new URL(detail.url).hostname || detail.url;
+  } catch {
+    return detail.url;
+  }
+}
+
+function categoryIdentity(input: {
+  descriptor: ToolCallDescriptor;
+  normalizedName: string;
+  displayName: string;
+}): { key: string; label: string; iconName: ToolCallIcon } {
+  if (isPaseoToolName(input.descriptor.name) || isDirectPaseoToolName(input.normalizedName)) {
+    return { key: "paseo", label: "Paseo", iconName: "paseo" };
+  }
+  if (
+    (input.descriptor.detail.type === "search" &&
+      input.descriptor.detail.toolName === "web_search") ||
+    isDirectSearchToolName(input.normalizedName)
+  ) {
+    return { key: "web_search", label: "Web search", iconName: "search" };
+  }
+  if (input.descriptor.detail.type === "fetch") {
+    return { key: "fetch", label: "Web fetch", iconName: "search" };
+  }
+  if (input.descriptor.detail.type !== "unknown" && input.descriptor.detail.type !== "plain_text") {
+    return {
+      key: input.descriptor.detail.type,
+      label: input.displayName,
+      iconName: resolveToolCallIconName(input.descriptor.name, input.descriptor.detail),
+    };
+  }
+  return {
+    key: `tool:${input.displayName.toLowerCase()}`,
+    label: input.displayName,
+    iconName: resolveToolCallIconName(input.descriptor.name, input.descriptor.detail),
+  };
+}
+
 function buildCompactToolCallGroup(calls: ToolCallItem[]) {
   const editedFiles = new Set<string>();
   const readFiles = new Set<string>();
+  const categories = new Map<string, ToolCallCategorySummary>();
   let failedCount = 0;
   let isRunning = false;
   let commandCount = 0;
@@ -93,8 +168,38 @@ function buildCompactToolCallGroup(calls: ToolCallItem[]) {
     failedCount += isFailed ? 1 : 0;
     isRunning ||= isCallRunning;
     const normalizedName = descriptor.name.trim().toLowerCase();
+    const display = buildToolCallDisplayModel({
+      name: descriptor.name,
+      status: descriptor.status,
+      error: descriptor.error,
+      detail: descriptor.detail,
+      metadata: descriptor.metadata,
+    });
+    const identity = categoryIdentity({
+      descriptor,
+      normalizedName,
+      displayName: display.displayName,
+    });
+    let category = categories.get(identity.key);
+    if (!category) {
+      category = {
+        ...identity,
+        callCount: 0,
+        failedCount: 0,
+        runningCount: 0,
+        resources: [],
+      };
+      categories.set(identity.key, category);
+    }
+    category.callCount += 1;
+    category.failedCount += isFailed ? 1 : 0;
+    category.runningCount += isCallRunning ? 1 : 0;
+    const resource = resourceForDetail(descriptor.detail);
+    if (resource && !category.resources.includes(resource)) {
+      category.resources.push(resource);
+    }
 
-    if (isPaseoToolName(descriptor.name) || normalizedName.startsWith(DIRECT_PASEO_TOOL_PREFIX)) {
+    if (isPaseoToolName(descriptor.name) || isDirectPaseoToolName(normalizedName)) {
       paseoCallCount += 1;
       continue;
     }
@@ -110,7 +215,7 @@ function buildCompactToolCallGroup(calls: ToolCallItem[]) {
       readFiles.add(descriptor.detail.filePath);
       continue;
     }
-    if (descriptor.detail.type === "search" || DIRECT_SEARCH_TOOL_NAMES.has(normalizedName)) {
+    if (descriptor.detail.type === "search" || isDirectSearchToolName(normalizedName)) {
       searchCount += 1;
       continue;
     }
@@ -124,6 +229,7 @@ function buildCompactToolCallGroup(calls: ToolCallItem[]) {
   return {
     id: firstCall.id,
     calls,
+    callCount: calls.length,
     failedCount,
     isRunning,
     editedFileCount: editedFiles.size,
@@ -132,6 +238,7 @@ function buildCompactToolCallGroup(calls: ToolCallItem[]) {
     searchCount,
     otherToolCount,
     paseoCallCount,
+    categories: [...categories.values()],
   } satisfies CompactToolCallGroup;
 }
 

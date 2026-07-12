@@ -212,24 +212,73 @@ function AutoExpandReasoningRow({ value, onChange }: AutoExpandReasoningRowProps
   );
 }
 
-const COMPACT_TOOL_CALLS_ROW_STYLE = [settingsStyles.row, settingsStyles.rowBorder];
+const TOOL_CALL_DETAIL_ROW_STYLE = [settingsStyles.row, settingsStyles.rowBorder];
+const TOOL_CALL_DETAIL_LEVELS: readonly AppSettings["toolCallDetailLevel"][] = [
+  "overview",
+  "concise",
+  "detailed",
+];
 
-interface CompactToolCallsRowProps {
-  value: boolean;
-  onChange: (value: boolean) => void;
+function getToolCallDetailLevelLabel(
+  t: TFunction,
+  value: AppSettings["toolCallDetailLevel"],
+): string {
+  return t(`settings.general.toolCallDetail.options.${value}`);
 }
 
-function CompactToolCallsRow({ value, onChange }: CompactToolCallsRowProps) {
+interface ToolCallDetailMenuItemProps {
+  value: AppSettings["toolCallDetailLevel"];
+  selected: boolean;
+  onChange: (value: AppSettings["toolCallDetailLevel"]) => void;
+}
+
+function ToolCallDetailMenuItem({ value, selected, onChange }: ToolCallDetailMenuItemProps) {
   const { t } = useTranslation();
+  const handleSelect = useCallback(() => onChange(value), [onChange, value]);
   return (
-    <View style={COMPACT_TOOL_CALLS_ROW_STYLE}>
+    <DropdownMenuItem selected={selected} onSelect={handleSelect}>
+      {getToolCallDetailLevelLabel(t, value)}
+    </DropdownMenuItem>
+  );
+}
+
+interface ToolCallDetailRowProps {
+  value: AppSettings["toolCallDetailLevel"];
+  onChange: (value: AppSettings["toolCallDetailLevel"]) => void;
+}
+
+function ToolCallDetailRow({ value, onChange }: ToolCallDetailRowProps) {
+  const { t } = useTranslation();
+  const selectedLabel = getToolCallDetailLevelLabel(t, value);
+  return (
+    <View style={TOOL_CALL_DETAIL_ROW_STYLE}>
       <View style={settingsStyles.rowContent}>
-        <Text style={settingsStyles.rowTitle}>{t("settings.general.compactToolCalls.label")}</Text>
+        <Text style={settingsStyles.rowTitle}>{t("settings.general.toolCallDetail.label")}</Text>
         <Text style={settingsStyles.rowHint}>
-          {t("settings.general.compactToolCalls.description")}
+          {t("settings.general.toolCallDetail.description")}
         </Text>
       </View>
-      <Switch value={value} onValueChange={onChange} />
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          style={dropdownTriggerStyle}
+          accessibilityLabel={t("settings.general.toolCallDetail.accessibilityLabel", {
+            value: selectedLabel,
+          })}
+        >
+          <Text style={styles.triggerText}>{selectedLabel}</Text>
+          <ThemedChevronDown size={ICON_SIZE.sm} uniProps={mutedColorMapping} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="bottom" align="end" width={200}>
+          {TOOL_CALL_DETAIL_LEVELS.map((option) => (
+            <ToolCallDetailMenuItem
+              key={option}
+              value={option}
+              selected={value === option}
+              onChange={onChange}
+            />
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </View>
   );
 }
@@ -449,9 +498,9 @@ export function AppearanceSection() {
     [updateSettings],
   );
 
-  const handleCompactToolCallsChange = useCallback(
-    (compactToolCalls: boolean) => {
-      void updateSettings({ compactToolCalls });
+  const handleToolCallDetailLevelChange = useCallback(
+    (toolCallDetailLevel: AppSettings["toolCallDetailLevel"]) => {
+      void updateSettings({ toolCallDetailLevel });
     },
     [updateSettings],
   );
@@ -542,9 +591,9 @@ export function AppearanceSection() {
             value={settings.autoExpandReasoning}
             onChange={handleAutoExpandReasoningChange}
           />
-          <CompactToolCallsRow
-            value={settings.compactToolCalls}
-            onChange={handleCompactToolCallsChange}
+          <ToolCallDetailRow
+            value={settings.toolCallDetailLevel}
+            onChange={handleToolCallDetailLevelChange}
           />
         </View>
       </SettingsSection>

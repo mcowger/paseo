@@ -1419,6 +1419,8 @@ export const fr: TranslationResources = {
     output: "Sortir",
   },
   toolCallGroup: {
+    title: "Outils",
+    accessibilityLabel: "Outils, {{count}} appels",
     editedFiles: {
       one: "a modifié {{count}} fichier",
       other: "a modifié {{count}} fichiers",
@@ -1544,9 +1546,15 @@ export const fr: TranslationResources = {
         label: "Toujours afficher le raisonnement",
         description: "Afficher le raisonnement de l'agent entièrement développé par défaut",
       },
-      compactToolCalls: {
-        label: "Compacter les appels d’outils",
-        description: "Regrouper les longues séries d’appels dans des résumés extensibles",
+      toolCallDetail: {
+        label: "Détail des appels d’outils",
+        description: "Affichage de l’activité des outils dans la chronologie de l’agent",
+        accessibilityLabel: "Sélectionner le détail des outils ({{value}})",
+        options: {
+          overview: "Vue d’ensemble",
+          concise: "Concis",
+          detailed: "Détaillé",
+        },
       },
       language: {
         label: "Langue",
