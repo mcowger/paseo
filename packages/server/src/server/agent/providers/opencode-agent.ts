@@ -180,7 +180,10 @@ function resolveOpenCodeCreateConfig(
       : input.featureValues;
 
   if (inheritsUnattended && requestedMode === undefined) {
-    return { modeId: OPENCODE_BUILD_MODE_ID, featureValues };
+    // Unattendedness for OpenCode is carried by auto_accept (set above), not
+    // by any particular agent. Leave the mode unset so OpenCode uses its own
+    // default agent — `build` may not exist in the user's OpenCode config.
+    return { modeId: undefined, featureValues };
   }
 
   const resolved = resolveDefaultAgentCreateConfig({
@@ -570,16 +573,23 @@ function matchesHydratedFingerprint(
   return hydratedFingerprint === JSON.stringify(value);
 }
 
-function normalizeOpenCodeModeId(modeId: string | null | undefined): string {
+// `null` = no explicit mode. The `agent` field is then omitted from OpenCode
+// prompt/command calls so OpenCode falls back to its own configured default
+// agent — never assume any particular agent (even `build`) exists, since
+// OpenCode users can define or delete agents at will.
+function normalizeOpenCodeModeId(modeId: string | null | undefined): string | null {
   const trimmed = typeof modeId === "string" ? modeId.trim() : "";
   if (!trimmed || trimmed === "default") {
-    return OPENCODE_BUILD_MODE_ID;
+    return null;
   }
   return trimmed;
 }
 
-function resolveOpenCodeRuntimeAgentId(modeId: string | null | undefined): string {
+function resolveOpenCodeRuntimeAgentId(modeId: string | null | undefined): string | undefined {
   const normalizedModeId = normalizeOpenCodeModeId(modeId);
+  if (normalizedModeId === null) {
+    return undefined;
+  }
   return normalizedModeId === OPENCODE_LEGACY_FULL_ACCESS_MODE_ID
     ? OPENCODE_BUILD_MODE_ID
     : normalizedModeId;
@@ -1152,7 +1162,7 @@ function resolveOpenCodePersistedSessionModeId(
   messages: ReadonlyArray<OpenCodeSessionMessage>,
 ): string | undefined {
   const agent = session.agent ?? messages.map(readOpenCodeMessageAgent).find(Boolean);
-  return agent ? normalizeOpenCodeModeId(agent) : undefined;
+  return agent ? (normalizeOpenCodeModeId(agent) ?? undefined) : undefined;
 }
 
 function readOpenCodeMessageAgent(message: OpenCodeSessionMessage): string | undefined {
@@ -2846,7 +2856,7 @@ class OpenCodeAgentSession implements AgentSession {
   private readonly sessionId: string;
   private readonly logger: Logger;
   private readonly modelContextWindowsByModelKey: ReadonlyMap<string, number>;
-  private currentMode: string = "default";
+  private currentMode: string | null = null;
   private autoAcceptEnabled = false;
   private pendingPermissions = new Map<string, AgentPermissionRequest>();
   private abortController: AbortController | null = null;
@@ -3771,7 +3781,7 @@ class OpenCodeAgentSession implements AgentSession {
     }
 
     this.currentMode = normalizedModeId;
-    this.config.modeId = normalizedModeId;
+    this.config.modeId = normalizedModeId ?? undefined;
   }
 
   async setFeature(featureId: string, value: unknown): Promise<void> {

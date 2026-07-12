@@ -238,9 +238,11 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
         sessionID: "session-1",
         directory: cwd,
         model: { providerID: "opencode", modelID: "big-pickle" },
-        agent: "build",
       }),
     ]);
+    // No modeId configured → no agent field: OpenCode must fall back to its
+    // own default agent instead of Paseo assuming any particular agent exists.
+    expect(openCodeClient.calls.sessionPromptAsync[0]).not.toHaveProperty("agent");
 
     await session.close();
     rmSync(cwd, { recursive: true, force: true });

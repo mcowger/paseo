@@ -179,9 +179,12 @@ describe("OpenCode auto_accept feature", () => {
     ).toEqual({ modeId: "build", featureValues: { auto_accept: true } });
   });
 
-  test("inherits unattended callers as build plus auto accept", () => {
+  test("inherits unattended callers as auto accept with OpenCode's default agent", () => {
     const client = new OpenCodeAgentClient(createTestLogger());
 
+    // Unattendedness is carried by auto_accept, not by a specific agent. The
+    // mode stays unset so OpenCode picks its own default agent — `build` may
+    // not exist in the user's OpenCode config.
     expect(
       client.resolveCreateConfig({
         provider: "opencode",
@@ -198,10 +201,10 @@ describe("OpenCode auto_accept feature", () => {
           { id: "plan", label: "Plan" },
         ],
       }),
-    ).toEqual({ modeId: "build", featureValues: { auto_accept: true } });
+    ).toEqual({ modeId: undefined, featureValues: { auto_accept: true } });
   });
 
-  test("defaults unattended creation without a parent to build plus auto accept", () => {
+  test("defaults unattended creation without a parent to auto accept with OpenCode's default agent", () => {
     const client = new OpenCodeAgentClient(createTestLogger());
 
     expect(
@@ -216,7 +219,7 @@ describe("OpenCode auto_accept feature", () => {
           { id: "plan", label: "Plan" },
         ],
       }),
-    ).toEqual({ modeId: "build", featureValues: { auto_accept: true } });
+    ).toEqual({ modeId: undefined, featureValues: { auto_accept: true } });
   });
 
   test("preserves the selected OpenCode agent when inheriting auto accept from an OpenCode parent", () => {
