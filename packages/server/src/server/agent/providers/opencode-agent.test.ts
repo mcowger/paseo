@@ -514,10 +514,17 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     expect(maxActiveProviderListCalls).toBeLessThanOrEqual(4);
   });
 
-  test("available modes include build and plan", async () => {
+  test("available modes reflect the agents OpenCode discovers", async () => {
     const cwd = tmpCwd();
     const runtime = new TestOpenCodeHarness();
-    runtime.enqueueClient(new TestOpenCodeClient());
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.appAgentsResponse = {
+      data: [
+        { name: "build", mode: "primary" },
+        { name: "plan", mode: "primary" },
+      ],
+    };
+    runtime.enqueueClient(openCodeClient);
     const client = new OpenCodeAgentClient(logger, undefined, {
       serverManager: runtime,
       createClient: runtime.createClient,
@@ -528,6 +535,27 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
 
     expect(modes.some((mode) => mode.id === "build")).toBe(true);
     expect(modes.some((mode) => mode.id === "plan")).toBe(true);
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }, 60_000);
+
+  test("available modes are empty when OpenCode discovers no agents", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    // Default TestOpenCodeClient returns no agents. Discovery failure/empty
+    // must not fabricate modes — OpenCode users can rename/delete any agent,
+    // so a hardcoded fallback could validate a mode that doesn't exist.
+    runtime.enqueueClient(new TestOpenCodeClient());
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession(buildConfig(cwd));
+
+    const modes = await session.getAvailableModes();
+
+    expect(modes).toEqual([]);
 
     await session.close();
     rmSync(cwd, { recursive: true, force: true });
