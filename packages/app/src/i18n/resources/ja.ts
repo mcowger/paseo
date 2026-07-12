@@ -1396,6 +1396,8 @@ export const ja: TranslationResources = {
     output: "出力",
   },
   toolCallGroup: {
+    title: "ツール",
+    accessibilityLabel: "ツール、{{count}}件の呼び出し",
     editedFiles: {
       one: "{{count}}個のファイルを編集",
       other: "{{count}}個のファイルを編集",
@@ -1519,9 +1521,15 @@ export const ja: TranslationResources = {
         label: "常に思考プロセスを展開",
         description: "デフォルトでAIのエージェント思考・推論ブロックを完全に展開して表示します",
       },
-      compactToolCalls: {
-        label: "ツール呼び出しをまとめる",
-        description: "長いツール呼び出しの連続を展開可能な概要にまとめます",
+      toolCallDetail: {
+        label: "ツール呼び出しの詳細",
+        description: "エージェントのタイムラインでのツール活動の表示方法",
+        accessibilityLabel: "ツール詳細を選択（{{value}}）",
+        options: {
+          overview: "概要",
+          concise: "簡潔",
+          detailed: "詳細",
+        },
       },
       language: {
         label: "言語",

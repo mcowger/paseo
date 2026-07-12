@@ -322,7 +322,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const { t } = useTranslation();
     const router = useRouter();
     const autoExpandReasoning = useSettings((settings) => settings.autoExpandReasoning);
-    const compactToolCalls = useSettings((settings) => settings.compactToolCalls);
+    const toolCallDetailLevel = useSettings((settings) => settings.toolCallDetailLevel);
     const viewportRef = useRef<StreamViewportHandle | null>(null);
     const isMobile = useIsCompactFormFactor();
     const streamRenderStrategy = useMemo(
@@ -530,9 +530,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         compactToolCallRuns({
           tail: effectiveStreamItems,
           head: effectiveStreamHead ?? EMPTY_STREAM_HEAD,
-          enabled: compactToolCalls,
+          enabled: toolCallDetailLevel !== "detailed",
         }),
-      [compactToolCalls, effectiveStreamHead, effectiveStreamItems],
+      [effectiveStreamHead, effectiveStreamItems, toolCallDetailLevel],
     );
 
     const baseRenderModel = useMemo(() => {
@@ -736,6 +736,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         return (
           <ToolCallGroup
             group={group}
+            presentation={toolCallDetailLevel === "concise" ? "concise" : "overview"}
             expanded={expanded}
             onExpandedChange={setToolCallGroupExpanded}
           >
@@ -752,6 +753,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         expandedToolCallGroupIds,
         renderSingleToolCallItem,
         setToolCallGroupExpanded,
+        toolCallDetailLevel,
       ],
     );
 

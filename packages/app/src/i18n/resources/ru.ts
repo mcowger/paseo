@@ -1410,6 +1410,8 @@ export const ru: TranslationResources = {
     output: "Выход",
   },
   toolCallGroup: {
+    title: "Инструменты",
+    accessibilityLabel: "Инструменты, вызовов: {{count}}",
     editedFiles: {
       one: "изменён {{count}} файл",
       other: "изменено {{count}} файлов",
@@ -1534,9 +1536,15 @@ export const ru: TranslationResources = {
         description:
           "По умолчанию показывать блоки размышлений и логики агента полностью развернутыми",
       },
-      compactToolCalls: {
-        label: "Свернуть вызовы инструментов",
-        description: "Группировать длинные серии вызовов в разворачиваемые сводки",
+      toolCallDetail: {
+        label: "Детализация вызовов инструментов",
+        description: "Отображение активности инструментов в хронологии агента",
+        accessibilityLabel: "Выбрать детализацию инструментов ({{value}})",
+        options: {
+          overview: "Обзор",
+          concise: "Кратко",
+          detailed: "Подробно",
+        },
       },
       language: {
         label: "Язык",

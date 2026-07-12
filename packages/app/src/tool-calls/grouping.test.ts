@@ -69,6 +69,11 @@ describe("compactToolCallRuns", () => {
       commandCount: 2,
       readFileCount: 1,
       otherToolCount: 0,
+      categories: [
+        { key: "shell", label: "Shell", callCount: 2, resources: [] },
+        { key: "read", label: "Read", callCount: 1, resources: ["a.ts"] },
+        { key: "edit", label: "Edit", callCount: 1, resources: ["a.ts"] },
+      ],
     });
 
     const nextCall = toolCall("5", { type: "shell", command: "five" }, { status: "running" });

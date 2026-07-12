@@ -1418,6 +1418,8 @@ export const es: TranslationResources = {
     output: "Producción",
   },
   toolCallGroup: {
+    title: "Herramientas",
+    accessibilityLabel: "Herramientas, {{count}} llamadas",
     editedFiles: {
       one: "editó {{count}} archivo",
       other: "editó {{count}} archivos",
@@ -1544,9 +1546,15 @@ export const es: TranslationResources = {
         description:
           "Mostrar los bloques de pensamiento y razonamiento del agente totalmente expandidos de forma predeterminada",
       },
-      compactToolCalls: {
-        label: "Compactar llamadas a herramientas",
-        description: "Agrupar secuencias largas de llamadas en resúmenes expandibles",
+      toolCallDetail: {
+        label: "Detalle de llamadas a herramientas",
+        description: "Cómo aparece la actividad de herramientas en las cronologías del agente",
+        accessibilityLabel: "Seleccionar detalle de herramientas ({{value}})",
+        options: {
+          overview: "Resumen",
+          concise: "Conciso",
+          detailed: "Detallado",
+        },
       },
       language: {
         label: "Idioma",
