@@ -1403,6 +1403,11 @@ export const ptBR: TranslationResources = {
     input: "Entrada",
     output: "Saída",
   },
+  toolCallGroup: {
+    title: "Ferramentas",
+    accessibilityLabel: "Ferramentas, {{count}} chamadas",
+    failed: "{{count}} com falha",
+  },
   renameModal: {
     rename: "Renomear",
     saving: "Salvando...",
@@ -1500,6 +1505,10 @@ export const ptBR: TranslationResources = {
         label: "Sempre expandir raciocínio",
         description:
           "Mostrar os blocos de pensamento e raciocínio do agente totalmente expandidos por padrão",
+      },
+      compactToolCalls: {
+        label: "Compactar chamadas de ferramentas",
+        description: "Agrupar longas sequências de chamadas em resumos expansíveis",
       },
       language: {
         label: "Idioma",

@@ -40,6 +40,7 @@ export interface AppSettings {
   syntaxTheme: SyntaxThemeId; // default "one"
   workspaceTitleSource: WorkspaceTitleSource;
   autoExpandReasoning: boolean;
+  compactToolCalls: boolean;
 }
 
 export interface Settings extends AppSettings {
@@ -60,6 +61,7 @@ export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   syntaxTheme: "one",
   workspaceTitleSource: "title",
   autoExpandReasoning: false,
+  compactToolCalls: false,
 };
 
 export const DEFAULT_APP_SETTINGS: Settings = {
@@ -208,6 +210,9 @@ function pickAppSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
   }
   if (typeof stored.autoExpandReasoning === "boolean") {
     result.autoExpandReasoning = stored.autoExpandReasoning;
+  }
+  if (typeof stored.compactToolCalls === "boolean") {
+    result.compactToolCalls = stored.compactToolCalls;
   }
   return result;
 }

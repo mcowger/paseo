@@ -186,6 +186,9 @@ export function useSettings<TSelected>(
       if (updates.autoExpandReasoning !== undefined) {
         appUpdates.autoExpandReasoning = updates.autoExpandReasoning;
       }
+      if (updates.compactToolCalls !== undefined) {
+        appUpdates.compactToolCalls = updates.compactToolCalls;
+      }
       const promises: Promise<void>[] = [];
       if (Object.keys(appUpdates).length > 0) {
         promises.push(appSettings.updateSettings(appUpdates));

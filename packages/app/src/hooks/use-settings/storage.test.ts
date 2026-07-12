@@ -306,6 +306,17 @@ describe("appearance settings", () => {
     expect(result.uiFontSize).toBe(DEFAULT_UI_FONT_SIZE);
     expect(result.codeFontSize).toBe(DEFAULT_CODE_FONT_SIZE);
     expect(result.syntaxTheme).toBe("one");
+    expect(result.compactToolCalls).toBe(false);
+  });
+
+  it("loads an explicitly enabled compact tool call preference", async () => {
+    const deps = makeDeps({
+      storage: createInMemoryKeyValueStorage({
+        [APP_SETTINGS_KEY]: JSON.stringify({ compactToolCalls: true }),
+      }),
+    });
+
+    expect((await loadAppSettingsFromStorage(deps)).compactToolCalls).toBe(true);
   });
 
   it("clamps the UI font size into range and rejects non-numeric values", async () => {

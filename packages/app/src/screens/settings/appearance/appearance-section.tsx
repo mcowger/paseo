@@ -212,6 +212,28 @@ function AutoExpandReasoningRow({ value, onChange }: AutoExpandReasoningRowProps
   );
 }
 
+const COMPACT_TOOL_CALLS_ROW_STYLE = [settingsStyles.row, settingsStyles.rowBorder];
+
+interface CompactToolCallsRowProps {
+  value: boolean;
+  onChange: (value: boolean) => void;
+}
+
+function CompactToolCallsRow({ value, onChange }: CompactToolCallsRowProps) {
+  const { t } = useTranslation();
+  return (
+    <View style={COMPACT_TOOL_CALLS_ROW_STYLE}>
+      <View style={settingsStyles.rowContent}>
+        <Text style={settingsStyles.rowTitle}>{t("settings.general.compactToolCalls.label")}</Text>
+        <Text style={settingsStyles.rowHint}>
+          {t("settings.general.compactToolCalls.description")}
+        </Text>
+      </View>
+      <Switch value={value} onValueChange={onChange} />
+    </View>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Fonts: family text fields + numeric size fields (commit on blur/submit)
 // ---------------------------------------------------------------------------
@@ -427,6 +449,13 @@ export function AppearanceSection() {
     [updateSettings],
   );
 
+  const handleCompactToolCallsChange = useCallback(
+    (compactToolCalls: boolean) => {
+      void updateSettings({ compactToolCalls });
+    },
+    [updateSettings],
+  );
+
   const commitUiFontFamily = useCallback(
     (value: string) => {
       const sanitized = sanitizeFontFamily(value);
@@ -512,6 +541,10 @@ export function AppearanceSection() {
           <AutoExpandReasoningRow
             value={settings.autoExpandReasoning}
             onChange={handleAutoExpandReasoningChange}
+          />
+          <CompactToolCallsRow
+            value={settings.compactToolCalls}
+            onChange={handleCompactToolCallsChange}
           />
         </View>
       </SettingsSection>

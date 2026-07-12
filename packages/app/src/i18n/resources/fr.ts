@@ -1420,6 +1420,11 @@ export const fr: TranslationResources = {
     input: "Saisir",
     output: "Sortir",
   },
+  toolCallGroup: {
+    title: "Outils",
+    accessibilityLabel: "Outils, {{count}} appels",
+    failed: "{{count}} en échec",
+  },
   renameModal: {
     rename: "Rebaptiser",
     saving: "Sauvegarde...",
@@ -1517,6 +1522,10 @@ export const fr: TranslationResources = {
       autoExpandReasoning: {
         label: "Toujours afficher le raisonnement",
         description: "Afficher le raisonnement de l'agent entièrement développé par défaut",
+      },
+      compactToolCalls: {
+        label: "Compacter les appels d’outils",
+        description: "Regrouper les longues séries d’appels dans des résumés extensibles",
       },
       language: {
         label: "Langue",

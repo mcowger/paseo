@@ -1378,6 +1378,11 @@ export const ar: TranslationResources = {
     input: "مدخل",
     output: "الإخراج",
   },
+  toolCallGroup: {
+    title: "الأدوات",
+    accessibilityLabel: "الأدوات، {{count}} استدعاءات",
+    failed: "فشل {{count}}",
+  },
   renameModal: {
     rename: "إعادة تسمية",
     saving: "جارٍ الحفظ...",
@@ -1474,6 +1479,10 @@ export const ar: TranslationResources = {
       autoExpandReasoning: {
         label: "عرض التفكير دائماً",
         description: "إظهار تفكير الوكيل وخطوات الاستدلال بشكل كامل بشكل افتراضي",
+      },
+      compactToolCalls: {
+        label: "ضغط استدعاءات الأدوات",
+        description: "تجميع السلاسل الطويلة من استدعاءات الأدوات في ملخصات قابلة للتوسيع",
       },
       language: {
         label: "لغة",
