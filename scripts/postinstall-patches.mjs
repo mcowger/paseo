@@ -78,6 +78,9 @@ for (const [cwd, files] of patchFilesByCwd) {
     rmSync(tempPatchDir, { recursive: true, force: true });
   }
 
+  if (result.error) {
+    console.error("postinstall-patches: patch-package failed to spawn:", result.error.message);
+  }
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
