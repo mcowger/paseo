@@ -1,6 +1,6 @@
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
-import { lstat, mkdir, stat } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { basename, normalize, resolve, sep } from "path";
 import { homedir } from "node:os";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
@@ -4811,12 +4811,24 @@ export class Session {
         }
       }
 
-      await runGitCommand(["clone", repo.cloneUrl, checkoutPath], {
-        cwd: targetParent,
-        timeout: 5 * 60 * 1000,
-        maxOutputBytes: 1024 * 1024,
-        logger: this.sessionLogger,
-      });
+      const cloneStagingPath = await mkdtemp(resolve(targetParent, ".paseo-clone-"));
+      try {
+        await runGitCommand(["clone", repo.cloneUrl, cloneStagingPath], {
+          cwd: targetParent,
+          timeout: 5 * 60 * 1000,
+          maxOutputBytes: 1024 * 1024,
+          logger: this.sessionLogger,
+        });
+        await rename(cloneStagingPath, checkoutPath);
+      } catch (error) {
+        await rm(cloneStagingPath, { recursive: true, force: true }).catch((cleanupError) => {
+          this.sessionLogger.warn(
+            { err: cleanupError, cloneStagingPath },
+            "Failed to clean up partial GitHub clone",
+          );
+        });
+        throw error;
+      }
 
       const workspace =
         await this.workspaceProvisioning.findOrCreateWorkspaceForDirectory(checkoutPath);

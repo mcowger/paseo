@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   getOpenProjectFailureReason,
   openGithubRepoDirectly,
@@ -64,6 +64,12 @@ interface RecordedNavigate {
   workspaceId: string;
 }
 
+interface RecordedClone {
+  repo: string;
+  targetDirectory: string;
+  cloneProtocol?: "https" | "ssh";
+}
+
 function createFakeSession() {
   const projects: RecordedProject[] = [];
   const merges: RecordedMerge[] = [];
@@ -101,6 +107,23 @@ function createFakeNavigator() {
     navigations,
     navigateToWorkspace: (serverId: string, workspaceId: string) => {
       navigations.push({ serverId, workspaceId });
+    },
+  };
+}
+
+function createFakeGithubCloneClient(workspace: ReturnType<typeof buildWorkspacePayload>) {
+  const clones: RecordedClone[] = [];
+  return {
+    clones,
+    cloneGithubWorkspace: async (input: RecordedClone) => {
+      clones.push(input);
+      return {
+        requestId: "request-3",
+        repo: "owner/project",
+        checkoutPath: PROJECT_PATH,
+        error: null,
+        workspace,
+      };
     },
   };
 }
@@ -206,13 +229,7 @@ describe("openGithubRepoDirectly", () => {
     const layout = createFakeWorkspaceLayout();
     const navigator = createFakeNavigator();
     const workspacePayload = buildWorkspacePayload();
-    const cloneGithubWorkspace = vi.fn(async () => ({
-      requestId: "request-3",
-      repo: "owner/project",
-      checkoutPath: PROJECT_PATH,
-      error: null,
-      workspace: workspacePayload,
-    }));
+    const github = createFakeGithubCloneClient(workspacePayload);
 
     const result = await openGithubRepoDirectly({
       serverId: SERVER_ID,
@@ -220,7 +237,7 @@ describe("openGithubRepoDirectly", () => {
       targetDirectory: "~/workspace",
       cloneProtocol: "https",
       isConnected: true,
-      client: { cloneGithubWorkspace },
+      client: github,
       mergeWorkspaces: session.mergeWorkspaces,
       setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
       openDraftTab: layout.openDraftTab,
@@ -228,11 +245,13 @@ describe("openGithubRepoDirectly", () => {
     });
 
     expect(result).toBe(true);
-    expect(cloneGithubWorkspace).toHaveBeenCalledWith({
-      repo: "owner/project",
-      targetDirectory: "~/workspace",
-      cloneProtocol: "https",
-    });
+    expect(github.clones).toEqual([
+      {
+        repo: "owner/project",
+        targetDirectory: "~/workspace",
+        cloneProtocol: "https",
+      },
+    ]);
     expect(session.merges).toHaveLength(1);
     expect(session.merges[0]?.serverId).toBe(SERVER_ID);
     expect(session.merges[0]?.workspaces[0]).toMatchObject({
@@ -244,6 +263,32 @@ describe("openGithubRepoDirectly", () => {
     expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
     expect(layout.openedTabs).toEqual([{ workspaceKey: `${SERVER_ID}:1` }]);
     expect(navigator.navigations).toEqual([{ serverId: SERVER_ID, workspaceId: "1" }]);
+  });
+
+  it("rejects a workspace without an identity before changing app state", async () => {
+    const session = createFakeSession();
+    const layout = createFakeWorkspaceLayout();
+    const navigator = createFakeNavigator();
+    const github = createFakeGithubCloneClient({ ...buildWorkspacePayload(), id: " " });
+
+    const result = await openGithubRepoDirectly({
+      serverId: SERVER_ID,
+      repo: "owner/project",
+      targetDirectory: "~/workspace",
+      cloneProtocol: "https",
+      isConnected: true,
+      client: github,
+      mergeWorkspaces: session.mergeWorkspaces,
+      setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
+      openDraftTab: layout.openDraftTab,
+      navigateToWorkspace: navigator.navigateToWorkspace,
+    });
+
+    expect(result).toBe(false);
+    expect(session.merges).toEqual([]);
+    expect(session.hydrated).toEqual([]);
+    expect(layout.openedTabs).toEqual([]);
+    expect(navigator.navigations).toEqual([]);
   });
 });
 

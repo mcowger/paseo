@@ -1,5 +1,5 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { ProjectAddResponse } from "@getpaseo/protocol/messages";
+import type { ProjectAddResponse, WorkspaceGithubCloneProtocol } from "@getpaseo/protocol/messages";
 import {
   normalizeEmptyProjectDescriptor as normalizeProjectWithoutWorkspacesDescriptor,
   normalizeWorkspaceDescriptor,
@@ -26,7 +26,7 @@ export interface OpenProjectFailure {
 
 export type OpenProjectResult = OpenProjectSuccess | OpenProjectFailure;
 export type OpenProjectFailureReason = "directory_not_found" | "open_failed";
-export type WorkspaceGithubCloneProtocol = "https" | "ssh";
+export type { WorkspaceGithubCloneProtocol };
 
 export function getOpenProjectFailureReason(
   result: OpenProjectResult,
@@ -112,9 +112,6 @@ function finishWorkspaceOpen(
   }
 
   const workspace = normalizeWorkspaceDescriptor(payload.workspace);
-  input.mergeWorkspaces(normalizedServerId, [workspace]);
-  input.setHasHydratedWorkspaces(normalizedServerId, true);
-
   const workspaceKey = buildWorkspaceTabPersistenceKey({
     serverId: normalizedServerId,
     workspaceId: workspace.id,
@@ -123,6 +120,8 @@ function finishWorkspaceOpen(
     return false;
   }
 
+  input.mergeWorkspaces(normalizedServerId, [workspace]);
+  input.setHasHydratedWorkspaces(normalizedServerId, true);
   input.openDraftTab(workspaceKey);
   input.navigateToWorkspace(normalizedServerId, workspace.id);
   return true;

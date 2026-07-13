@@ -56,6 +56,7 @@ import type {
   ProjectIconResponse,
   ProjectAddResponse,
   OpenProjectResponseMessage,
+  WorkspaceGithubCloneProtocol,
   WorkspaceGithubCloneResponse,
   ArchiveWorkspaceResponseMessage,
   WorkspaceSetupStatusResponseMessage,
@@ -150,8 +151,6 @@ const perfNow: () => number =
     : () => Date.now();
 
 const WORKSPACE_GITHUB_CLONE_TIMEOUT_MS = 5 * 60 * 1000;
-
-type WorkspaceGithubCloneProtocol = "https" | "ssh";
 
 interface ImportAgentInputBase {
   cwd?: string;
