@@ -207,12 +207,13 @@ describe("compactToolCallRuns", () => {
       toolCall("3", unknownDetail, { name: "paseo_list_providers" }),
       toolCall("4", unknownDetail, { name: "paseo_list_worktrees" }),
       toolCall("5", unknownDetail, { name: "paseo_list_worktrees" }),
+      toolCall("6", unknownDetail, { name: "mcp__exa__web_search" }),
     ];
 
     const result = compactToolCallRuns({ tail: calls, head: [], enabled: true });
 
     expect(result.groupsByHostId.get("1")).toMatchObject({
-      searchCount: 2,
+      searchCount: 3,
       otherToolCount: 0,
       paseoCallCount: 3,
     });

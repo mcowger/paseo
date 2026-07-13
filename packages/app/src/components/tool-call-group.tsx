@@ -92,6 +92,9 @@ function GroupHeaderIcon({
 }
 
 function joinSummaryParts(parts: string[], conjunction: string): string {
+  if (parts.length === 0) {
+    return "";
+  }
   let joined: string;
   if (parts.length === 1) {
     joined = parts[0] ?? "";

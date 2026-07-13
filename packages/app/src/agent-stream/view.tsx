@@ -691,11 +691,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     );
 
     const renderSingleToolCallItem = useCallback(
-      (
-        layoutItem: StreamLayoutItem,
-        item: Extract<StreamItem, { kind: "tool_call" }>,
-        isLastInSequence = layoutItem.isLastInToolSequence,
-      ) => {
+      (item: Extract<StreamItem, { kind: "tool_call" }>, isLastInSequence: boolean) => {
         const { payload } = item;
 
         if (payload.source === "agent") {
@@ -749,7 +745,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "tool_call" }>) => {
         const group = compactedToolCalls.groupsByHostId.get(item.id);
         if (!group) {
-          return renderSingleToolCallItem(layoutItem, item);
+          return renderSingleToolCallItem(item, layoutItem.isLastInToolSequence);
         }
         const expanded = expandedToolCallGroupIds.has(group.id);
         return (
@@ -761,7 +757,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
           >
             {group.calls.map((call, index) => (
               <React.Fragment key={call.id}>
-                {renderSingleToolCallItem(layoutItem, call, index === group.calls.length - 1)}
+                {renderSingleToolCallItem(call, index === group.calls.length - 1)}
               </React.Fragment>
             ))}
           </ToolCallGroup>

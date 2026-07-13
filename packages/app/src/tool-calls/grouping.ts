@@ -8,10 +8,7 @@ import { resolveToolCallIconName, type ToolCallIcon } from "@/utils/tool-call-ic
 export const MIN_COMPACT_TOOL_CALLS = 4;
 
 const DIRECT_PASEO_TOOL_PREFIX = "paseo_";
-const DIRECT_SEARCH_TOOL_NAMES = new Set([
-  "brave-search_brave_web_search",
-  "brave-search_brave_llm_context",
-]);
+const DIRECT_SEARCH_TOOL_SUFFIX_PATTERN = /(?:^|[_.:/])(?:web_search|llm_context)$/;
 
 export interface ToolCallCategorySummary {
   key: string;
@@ -106,7 +103,7 @@ function isDirectPaseoToolName(name: string): boolean {
 }
 
 function isDirectSearchToolName(name: string): boolean {
-  return DIRECT_SEARCH_TOOL_NAMES.has(name);
+  return DIRECT_SEARCH_TOOL_SUFFIX_PATTERN.test(name);
 }
 
 function resourceForDetail(detail: ToolCallDetail): ResourceSummary | null {
