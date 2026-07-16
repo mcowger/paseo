@@ -110,6 +110,46 @@ Commands run with the worktree as `cwd`. Use `$PASEO_SOURCE_CHECKOUT_PATH` to re
 
 Omit `port` to let Paseo auto-assign one. Bind your process to `$PASEO_PORT` rather than hard-coding, each worktree gets a distinct port so multiple copies of the same service coexist.
 
+### Dynamic port allocation
+
+By default, Paseo asks the OS for an available ephemeral port. Configure a range globally in
+`~/.paseo/config.json` or per project in `paseo.json`:
+
+```json
+// ~/.paseo/config.json
+{
+  "worktrees": {
+    "servicePorts": { "range": "3000-4000" }
+  }
+}
+```
+
+```json
+// paseo.json
+{
+  "worktree": {
+    "servicePorts": { "range": "3000-4000" }
+  }
+}
+```
+
+The range is inclusive. A project `servicePorts` block replaces the global block. An explicit
+service `port` always wins over either setting.
+
+For an external allocator, configure `portScript` instead:
+
+```json
+{
+  "worktree": {
+    "servicePorts": { "portScript": "/usr/bin/portmake" }
+  }
+}
+```
+
+Paseo runs the executable with no arguments in the workspace directory. It must print one valid
+TCP port to stdout. `portScript` wins over `range` in the same block; Paseo verifies its result is
+currently available before injecting it into `$PASEO_PORT`.
+
 ### Reverse proxy
 
 Every service is reachable through the daemon at a deterministic hostname:
