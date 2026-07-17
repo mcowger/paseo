@@ -10,12 +10,14 @@ describe("ensureWorkspaceServicePortPlan", () => {
   it("allocates ports for all declared services in declaration order", async () => {
     let nextPort = 4100;
     let allocationCount = 0;
+    const allocatedServices: string[] = [];
 
     const plan = await ensureWorkspaceServicePortPlan({
       workspaceId: "registry-order-workspace",
       services: [{ scriptName: "api" }, { scriptName: "web" }, { scriptName: "worker" }],
-      allocatePort: async () => {
+      allocatePort: async ({ scriptName }) => {
         allocationCount += 1;
+        allocatedServices.push(scriptName);
         const port = nextPort;
         nextPort += 1;
         return port;
@@ -28,6 +30,7 @@ describe("ensureWorkspaceServicePortPlan", () => {
       ["worker", 4102],
     ]);
     expect(allocationCount).toBe(3);
+    expect(allocatedServices).toEqual(["api", "web", "worker"]);
   });
 
   it("returns the existing plan without calling the allocator on later calls", async () => {
@@ -152,6 +155,19 @@ describe("ensureWorkspaceServicePortPlan", () => {
     ).rejects.toThrow("Service 'web' has a duplicate port 4400");
   });
 
+  it("reserves later explicit ports before allocating dynamic services", async () => {
+    const plan = await ensureWorkspaceServicePortPlan({
+      workspaceId: "registry-later-explicit-port-workspace",
+      services: [{ scriptName: "web" }, { scriptName: "api", port: 5500 }],
+      allocatePort: async ({ reservedPorts }) => (reservedPorts.has(5500) ? 5501 : 5500),
+    });
+
+    expect(Array.from(plan.entries())).toEqual([
+      ["web", 5501],
+      ["api", 5500],
+    ]);
+  });
+
   it("keeps workspace plans independent", async () => {
     const firstPlan = await ensureWorkspaceServicePortPlan({
       workspaceId: "registry-independent-workspace-a",
@@ -208,13 +224,18 @@ describe("ensureWorkspaceServicePortPlan", () => {
   });
 
   it("rolls back dynamic reservations when plan creation fails", async () => {
+    let allocationCount = 0;
     await expect(
       ensureWorkspaceServicePortPlan({
         workspaceId: "registry-failed-plan-workspace",
-        services: [{ scriptName: "api" }, { scriptName: "web", port: 5400 }],
-        allocatePort: async () => 5400,
+        services: [{ scriptName: "api" }, { scriptName: "web" }],
+        allocatePort: async () => {
+          allocationCount += 1;
+          if (allocationCount === 1) return 5400;
+          throw new Error("Allocation failed");
+        },
       }),
-    ).rejects.toThrow("Service 'web' has a duplicate port 5400");
+    ).rejects.toThrow("Allocation failed");
 
     const recoveredPlan = await ensureWorkspaceServicePortPlan({
       workspaceId: "registry-after-failed-plan-workspace",

@@ -146,9 +146,10 @@ For an external allocator, configure `portScript` instead:
 }
 ```
 
-Paseo runs the executable with no arguments in the workspace directory. It must print one valid
-TCP port to stdout. `portScript` wins over `range` in the same block; Paseo verifies its result is
-currently available before injecting it into `$PASEO_PORT`.
+Paseo runs the executable in the workspace directory with the service name as its first argument
+and in `PASEO_SCRIPTNAME`. It must print one valid TCP port to stdout. `portScript` wins over `range`
+in the same block. Paseo trusts the external allocator, so the returned port may already be in use,
+for example by a service Paseo will attach to.
 
 ### Reverse proxy
 

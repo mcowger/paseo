@@ -16,6 +16,7 @@ interface PortRange {
 export interface AllocateWorkspaceServicePortOptions {
   allocation: PaseoServicePortAllocation | undefined;
   cwd: string;
+  scriptName: string;
   reservedPorts?: ReadonlySet<number>;
 }
 
@@ -26,6 +27,7 @@ export async function allocateWorkspaceServicePort(
     return await allocatePortFromScript({
       cwd: options.cwd,
       command: options.allocation.portScript,
+      scriptName: options.scriptName,
       reservedPorts: options.reservedPorts,
     });
   }
@@ -41,12 +43,14 @@ export async function allocateWorkspaceServicePort(
 async function allocatePortFromScript(options: {
   cwd: string;
   command: string;
+  scriptName: string;
   reservedPorts: ReadonlySet<number> | undefined;
 }): Promise<number> {
   let result: { stdout: string; stderr: string };
   try {
-    result = await execCommand(options.command, [], {
+    result = await execCommand(options.command, [options.scriptName], {
       cwd: options.cwd,
+      envOverlay: { PASEO_SCRIPTNAME: options.scriptName },
       timeout: PORT_SCRIPT_TIMEOUT_MS,
       maxBuffer: PORT_SCRIPT_MAX_OUTPUT_BYTES,
       shell: false,
@@ -68,9 +72,6 @@ async function allocatePortFromScript(options: {
   }
   if (options.reservedPorts?.has(port)) {
     throw new Error(`Service port script '${options.command}' returned reserved port ${port}`);
-  }
-  if (!(await isPortAvailable(port))) {
-    throw new Error(`Service port script '${options.command}' returned unavailable port ${port}`);
   }
   return port;
 }

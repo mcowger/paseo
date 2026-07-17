@@ -766,10 +766,11 @@ async function setupServiceScriptRoute(params: {
   const plannedPorts = await ensureWorkspaceServicePortPlan({
     workspaceId,
     services: serviceDeclarations,
-    allocatePort: (reservedPorts) =>
+    allocatePort: ({ scriptName: serviceScriptName, reservedPorts }) =>
       allocateWorkspaceServicePort({
         allocation: servicePortAllocation,
         cwd: repoRoot,
+        scriptName: serviceScriptName,
         reservedPorts,
       }),
   });
@@ -778,10 +779,11 @@ async function setupServiceScriptRoute(params: {
       ? await refreshWorkspaceServicePort({
           workspaceId,
           service: { scriptName, port: config.port },
-          allocatePort: (reservedPorts) =>
+          allocatePort: ({ scriptName: serviceScriptName, reservedPorts }) =>
             allocateWorkspaceServicePort({
               allocation: servicePortAllocation,
               cwd: repoRoot,
+              scriptName: serviceScriptName,
               reservedPorts,
             }),
         })

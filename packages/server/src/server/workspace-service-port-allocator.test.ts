@@ -21,6 +21,7 @@ describe("allocateWorkspaceServicePort", () => {
       allocateWorkspaceServicePort({
         allocation: { range: `${port}-${port}` },
         cwd: tmpdir(),
+        scriptName: "web",
       }),
     ).resolves.toBe(port);
   });
@@ -33,34 +34,61 @@ describe("allocateWorkspaceServicePort", () => {
       allocateWorkspaceServicePort({
         allocation: { range: `${port}-${port}` },
         cwd: tmpdir(),
+        scriptName: "web",
       }),
     ).rejects.toThrow(`No available service port in configured range ${port}-${port}`);
 
     await close(server);
   });
 
-  it("uses portScript in preference to range and runs it in the workspace", async () => {
+  it("passes the service name to portScript and runs it in the workspace", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "workspace-service-port-allocator-"));
     tempDirs.push(tempDir);
     const port = await getFreePort();
     const scriptPath = join(tempDir, "portmake");
-    writeFileSync(scriptPath, `#!/bin/sh\nprintf '%s' "$PWD" > cwd\nprintf '${port}\\n'\n`);
+    writeFileSync(
+      scriptPath,
+      `#!/bin/sh\nprintf '%s' "$PWD" > cwd\nprintf '%s' "$1" > argv\nprintf '%s' "$PASEO_SCRIPTNAME" > env\nprintf '${port}\\n'\n`,
+    );
     chmodSync(scriptPath, 0o755);
 
     await expect(
       allocateWorkspaceServicePort({
         allocation: { range: "1-1", portScript: scriptPath },
         cwd: tempDir,
+        scriptName: "app-server",
       }),
     ).resolves.toBe(port);
     expect(readFileSync(join(tempDir, "cwd"), "utf8")).toBe(tempDir);
+    expect(readFileSync(join(tempDir, "argv"), "utf8")).toBe("app-server");
+    expect(readFileSync(join(tempDir, "env"), "utf8")).toBe("app-server");
+  });
+
+  it("accepts a valid portScript result that is already occupied", async () => {
+    const server = net.createServer();
+    const port = await listen(server);
+    const scriptPath = createPortScript(String(port));
+
+    await expect(
+      allocateWorkspaceServicePort({
+        allocation: { portScript: scriptPath },
+        cwd: tmpdir(),
+        scriptName: "api",
+      }),
+    ).resolves.toBe(port);
+
+    await close(server);
   });
 
   it("rejects invalid portScript output", async () => {
     const scriptPath = createPortScript("not-a-port");
 
     await expect(
-      allocateWorkspaceServicePort({ allocation: { portScript: scriptPath }, cwd: tmpdir() }),
+      allocateWorkspaceServicePort({
+        allocation: { portScript: scriptPath },
+        cwd: tmpdir(),
+        scriptName: "web",
+      }),
     ).rejects.toThrow("must print exactly one TCP port");
   });
 

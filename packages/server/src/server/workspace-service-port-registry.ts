@@ -3,16 +3,21 @@ interface WorkspaceServicePortDeclaration {
   port?: number;
 }
 
+interface WorkspaceServicePortAllocationRequest {
+  scriptName: string;
+  reservedPorts: ReadonlySet<number>;
+}
+
 interface EnsureWorkspaceServicePortPlanOptions {
   workspaceId: string;
   services: readonly WorkspaceServicePortDeclaration[];
-  allocatePort: (reservedPorts: ReadonlySet<number>) => Promise<number>;
+  allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
 }
 
 interface RefreshWorkspaceServicePortOptions {
   workspaceId: string;
   service: WorkspaceServicePortDeclaration;
-  allocatePort: (reservedPorts: ReadonlySet<number>) => Promise<number>;
+  allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
 }
 
 const workspaceServicePortPlans = new Map<string, Map<string, number>>();
@@ -67,7 +72,7 @@ export function releaseWorkspaceServicePortPlan(workspaceId: string): void {
 async function createPendingWorkspaceServicePortPlan(options: {
   workspaceId: string;
   services: readonly WorkspaceServicePortDeclaration[];
-  allocatePort: (reservedPorts: ReadonlySet<number>) => Promise<number>;
+  allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
 }): Promise<Map<string, number>> {
   try {
     const plan = await buildWorkspaceServicePortPlan({
@@ -88,17 +93,31 @@ async function createPendingWorkspaceServicePortPlan(options: {
 async function buildWorkspaceServicePortPlan(options: {
   workspaceId: string;
   services: readonly WorkspaceServicePortDeclaration[];
-  allocatePort: (reservedPorts: ReadonlySet<number>) => Promise<number>;
+  allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
 }): Promise<Map<string, number>> {
+  const explicitPortOwners = new Map<number, string>();
+  for (const service of options.services) {
+    if (service.port === undefined) continue;
+    if (explicitPortOwners.has(service.port)) {
+      throw new Error(`Service '${service.scriptName}' has a duplicate port ${service.port}`);
+    }
+    explicitPortOwners.set(service.port, service.scriptName);
+  }
+
   const plan = new Map<string, number>();
   for (const service of options.services) {
+    if (service.port !== undefined) {
+      plan.set(service.scriptName, service.port);
+      continue;
+    }
+    const reservedPorts = new Set([...explicitPortOwners.keys(), ...plan.values()]);
     plan.set(
       service.scriptName,
       await resolveServicePort({
         service,
         workspaceId: options.workspaceId,
         allocatePort: options.allocatePort,
-        reservedPorts: new Set(plan.values()),
+        reservedPorts,
       }),
     );
   }
@@ -140,7 +159,7 @@ export async function refreshWorkspaceServicePort(
 async function resolveServicePort(options: {
   service: WorkspaceServicePortDeclaration;
   workspaceId: string;
-  allocatePort: (reservedPorts: ReadonlySet<number>) => Promise<number>;
+  allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
   reservedPorts: ReadonlySet<number>;
 }): Promise<number> {
   const { service, workspaceId, allocatePort, reservedPorts } = options;
@@ -157,7 +176,10 @@ async function resolveServicePort(options: {
     for (const [port, owner] of dynamicPortOwners) {
       if (owner !== serviceOwner) unavailablePorts.add(port);
     }
-    const port = await allocatePort(unavailablePorts);
+    const port = await allocatePort({
+      scriptName: service.scriptName,
+      reservedPorts: unavailablePorts,
+    });
     if (reservedPorts.has(port)) continue;
     const owner = dynamicPortOwners.get(port);
     if (owner !== undefined && owner !== serviceOwner) continue;
