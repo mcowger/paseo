@@ -20,8 +20,16 @@ interface RefreshWorkspaceServicePortOptions {
   allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
 }
 
+interface PendingWorkspaceServicePortPlanToken {
+  isReleased: boolean;
+}
+
 const workspaceServicePortPlans = new Map<string, Map<string, number>>();
 const pendingWorkspaceServicePortPlans = new Map<string, Promise<Map<string, number>>>();
+const pendingWorkspaceServicePortPlanTokens = new Map<
+  string,
+  PendingWorkspaceServicePortPlanToken
+>();
 const dynamicPortOwners = new Map<number, string>();
 const dynamicPortsByWorkspace = new Map<string, Map<string, number>>();
 const MAX_DYNAMIC_PORT_ALLOCATION_ATTEMPTS = 10;
@@ -36,12 +44,15 @@ export async function ensureWorkspaceServicePortPlan(
 
   let pendingPlan = pendingWorkspaceServicePortPlans.get(options.workspaceId);
   if (!pendingPlan) {
+    const token: PendingWorkspaceServicePortPlanToken = { isReleased: false };
     pendingPlan = createPendingWorkspaceServicePortPlan({
       workspaceId: options.workspaceId,
       services: options.services,
       allocatePort: options.allocatePort,
+      token,
     });
     pendingWorkspaceServicePortPlans.set(options.workspaceId, pendingPlan);
+    pendingWorkspaceServicePortPlanTokens.set(options.workspaceId, token);
   }
 
   return new Map(await pendingPlan);
@@ -59,6 +70,8 @@ export function requirePlannedWorkspaceServicePort(
 }
 
 export function releaseWorkspaceServicePortPlan(workspaceId: string): void {
+  const pendingToken = pendingWorkspaceServicePortPlanTokens.get(workspaceId);
+  if (pendingToken) pendingToken.isReleased = true;
   workspaceServicePortPlans.delete(workspaceId);
   const dynamicPorts = dynamicPortsByWorkspace.get(workspaceId);
   if (!dynamicPorts) return;
@@ -73,6 +86,7 @@ async function createPendingWorkspaceServicePortPlan(options: {
   workspaceId: string;
   services: readonly WorkspaceServicePortDeclaration[];
   allocatePort: (request: WorkspaceServicePortAllocationRequest) => Promise<number>;
+  token: PendingWorkspaceServicePortPlanToken;
 }): Promise<Map<string, number>> {
   try {
     const plan = await buildWorkspaceServicePortPlan({
@@ -80,6 +94,11 @@ async function createPendingWorkspaceServicePortPlan(options: {
       services: options.services,
       allocatePort: options.allocatePort,
     });
+    if (options.token.isReleased) {
+      throw new Error(
+        `Workspace service port plan was released while being created for '${options.workspaceId}'`,
+      );
+    }
     workspaceServicePortPlans.set(options.workspaceId, plan);
     return plan;
   } catch (error) {
@@ -87,6 +106,7 @@ async function createPendingWorkspaceServicePortPlan(options: {
     throw error;
   } finally {
     pendingWorkspaceServicePortPlans.delete(options.workspaceId);
+    pendingWorkspaceServicePortPlanTokens.delete(options.workspaceId);
   }
 }
 

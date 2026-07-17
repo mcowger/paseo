@@ -223,6 +223,27 @@ describe("ensureWorkspaceServicePortPlan", () => {
     expect(reusedPlan.get("api")).toBe(5300);
   });
 
+  it("rolls back a plan released while allocation is pending", async () => {
+    const allocation = createDeferredPort();
+    const pendingPlan = ensureWorkspaceServicePortPlan({
+      workspaceId: "registry-pending-release-workspace",
+      services: [{ scriptName: "api" }],
+      allocatePort: async () => await allocation.promise,
+    });
+
+    releaseWorkspaceServicePortPlan("registry-pending-release-workspace");
+    allocation.resolve(5350);
+
+    await expect(pendingPlan).rejects.toThrow("Workspace service port plan was released");
+
+    const reusedPlan = await ensureWorkspaceServicePortPlan({
+      workspaceId: "registry-after-pending-release-workspace",
+      services: [{ scriptName: "api" }],
+      allocatePort: async () => 5350,
+    });
+    expect(reusedPlan.get("api")).toBe(5350);
+  });
+
   it("rolls back dynamic reservations when plan creation fails", async () => {
     let allocationCount = 0;
     await expect(
