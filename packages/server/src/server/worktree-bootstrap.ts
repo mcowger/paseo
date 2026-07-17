@@ -771,6 +771,8 @@ async function setupServiceScriptRoute(params: {
         allocation: servicePortAllocation,
         cwd: repoRoot,
         scriptName: serviceScriptName,
+        workspaceId,
+        branchName,
         reservedPorts,
       }),
   });
@@ -784,6 +786,8 @@ async function setupServiceScriptRoute(params: {
               allocation: servicePortAllocation,
               cwd: repoRoot,
               scriptName: serviceScriptName,
+              workspaceId,
+              branchName,
               reservedPorts,
             }),
         })

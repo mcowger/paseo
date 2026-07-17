@@ -17,6 +17,8 @@ export interface AllocateWorkspaceServicePortOptions {
   allocation: PaseoServicePortAllocation | undefined;
   cwd: string;
   scriptName: string;
+  workspaceId: string;
+  branchName: string | null;
   reservedPorts?: ReadonlySet<number>;
 }
 
@@ -28,6 +30,8 @@ export async function allocateWorkspaceServicePort(
       cwd: options.cwd,
       command: options.allocation.portScript,
       scriptName: options.scriptName,
+      workspaceId: options.workspaceId,
+      branchName: options.branchName,
       reservedPorts: options.reservedPorts,
     });
   }
@@ -44,17 +48,28 @@ async function allocatePortFromScript(options: {
   cwd: string;
   command: string;
   scriptName: string;
+  workspaceId: string;
+  branchName: string | null;
   reservedPorts: ReadonlySet<number> | undefined;
 }): Promise<number> {
   let result: { stdout: string; stderr: string };
   try {
-    result = await execCommand(options.command, [options.scriptName], {
-      cwd: options.cwd,
-      envOverlay: { PASEO_SCRIPTNAME: options.scriptName },
-      timeout: PORT_SCRIPT_TIMEOUT_MS,
-      maxBuffer: PORT_SCRIPT_MAX_OUTPUT_BYTES,
-      shell: false,
-    });
+    result = await execCommand(
+      options.command,
+      [options.scriptName, options.workspaceId, options.branchName ?? "", options.cwd],
+      {
+        cwd: options.cwd,
+        envOverlay: {
+          PASEO_SCRIPTNAME: options.scriptName,
+          PASEO_WORKSPACE_ID: options.workspaceId,
+          PASEO_BRANCH_NAME: options.branchName ?? "",
+          PASEO_WORKTREE_PATH: options.cwd,
+        },
+        timeout: PORT_SCRIPT_TIMEOUT_MS,
+        maxBuffer: PORT_SCRIPT_MAX_OUTPUT_BYTES,
+        shell: false,
+      },
+    );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Service port script '${options.command}' failed: ${detail}`, { cause: error });

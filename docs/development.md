@@ -281,9 +281,11 @@ Service proxy hostnames use the double-dash shape: `web--feature-auth--project.l
 Service ports use OS ephemeral allocation by default. Set `worktrees.servicePorts` in
 `$PASEO_HOME/config.json`, or replace it for one project with `worktree.servicePorts` in
 `paseo.json`. The block accepts an inclusive `range` such as `"3000-4000"` or a `portScript`
-executable. `portScript` runs in the workspace directory with the service name as its first argument
-and in `PASEO_SCRIPTNAME`, and must print one valid TCP port. Paseo trusts the external allocator, so
-the port may already be bound. `portScript` takes precedence when both values are present.
+executable. `portScript` runs in the workspace directory with four arguments: service name,
+workspace ID, branch name, and worktree path. A missing branch is passed as an empty string. The same
+values are available as `PASEO_SCRIPTNAME`, `PASEO_WORKSPACE_ID`, `PASEO_BRANCH_NAME`, and
+`PASEO_WORKTREE_PATH`. The script must print one valid TCP port. Paseo trusts the external allocator,
+so the port may already be bound. `portScript` takes precedence when both values are present.
 
 ## Bundled daemon web UI
 

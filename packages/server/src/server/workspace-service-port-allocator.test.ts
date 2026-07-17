@@ -22,6 +22,8 @@ describe("allocateWorkspaceServicePort", () => {
         allocation: { range: `${port}-${port}` },
         cwd: tmpdir(),
         scriptName: "web",
+        workspaceId: "wks_range_available",
+        branchName: "feature/range-available",
       }),
     ).resolves.toBe(port);
   });
@@ -35,20 +37,22 @@ describe("allocateWorkspaceServicePort", () => {
         allocation: { range: `${port}-${port}` },
         cwd: tmpdir(),
         scriptName: "web",
+        workspaceId: "wks_range_occupied",
+        branchName: "feature/range-occupied",
       }),
     ).rejects.toThrow(`No available service port in configured range ${port}-${port}`);
 
     await close(server);
   });
 
-  it("passes the service name to portScript and runs it in the workspace", async () => {
+  it("passes service and workspace context to portScript", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "workspace-service-port-allocator-"));
     tempDirs.push(tempDir);
     const port = await getFreePort();
     const scriptPath = join(tempDir, "portmake");
     writeFileSync(
       scriptPath,
-      `#!/bin/sh\nprintf '%s' "$PWD" > cwd\nprintf '%s' "$1" > argv\nprintf '%s' "$PASEO_SCRIPTNAME" > env\nprintf '${port}\\n'\n`,
+      `#!/bin/sh\nprintf '%s' "$PWD" > cwd\nprintf '%s|%s|%s|%s' "$1" "$2" "$3" "$4" > argv\nprintf '%s|%s|%s|%s' "$PASEO_SCRIPTNAME" "$PASEO_WORKSPACE_ID" "$PASEO_BRANCH_NAME" "$PASEO_WORKTREE_PATH" > env\nprintf '${port}\\n'\n`,
     );
     chmodSync(scriptPath, 0o755);
 
@@ -57,11 +61,17 @@ describe("allocateWorkspaceServicePort", () => {
         allocation: { range: "1-1", portScript: scriptPath },
         cwd: tempDir,
         scriptName: "app-server",
+        workspaceId: "wks_port_allocator",
+        branchName: "feature/allocator-context",
       }),
     ).resolves.toBe(port);
     expect(readFileSync(join(tempDir, "cwd"), "utf8")).toBe(tempDir);
-    expect(readFileSync(join(tempDir, "argv"), "utf8")).toBe("app-server");
-    expect(readFileSync(join(tempDir, "env"), "utf8")).toBe("app-server");
+    expect(readFileSync(join(tempDir, "argv"), "utf8")).toBe(
+      `app-server|wks_port_allocator|feature/allocator-context|${tempDir}`,
+    );
+    expect(readFileSync(join(tempDir, "env"), "utf8")).toBe(
+      `app-server|wks_port_allocator|feature/allocator-context|${tempDir}`,
+    );
   });
 
   it("accepts a valid portScript result that is already occupied", async () => {
@@ -74,6 +84,8 @@ describe("allocateWorkspaceServicePort", () => {
         allocation: { portScript: scriptPath },
         cwd: tmpdir(),
         scriptName: "api",
+        workspaceId: "wks_occupied_script_port",
+        branchName: null,
       }),
     ).resolves.toBe(port);
 
@@ -88,6 +100,8 @@ describe("allocateWorkspaceServicePort", () => {
         allocation: { portScript: scriptPath },
         cwd: tmpdir(),
         scriptName: "web",
+        workspaceId: "wks_invalid_script_output",
+        branchName: "feature/invalid-output",
       }),
     ).rejects.toThrow("must print exactly one TCP port");
   });
