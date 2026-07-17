@@ -49,12 +49,7 @@ describe("allocateWorkspaceServicePort", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "workspace-service-port-allocator-"));
     tempDirs.push(tempDir);
     const port = await getFreePort();
-    const scriptPath = join(tempDir, "portmake");
-    writeFileSync(
-      scriptPath,
-      `#!/bin/sh\nprintf '%s' "$PWD" > cwd\nprintf '%s|%s|%s|%s' "$1" "$2" "$3" "$4" > argv\nprintf '%s|%s|%s|%s' "$PASEO_SCRIPTNAME" "$PASEO_WORKSPACE_ID" "$PASEO_BRANCH_NAME" "$PASEO_WORKTREE_PATH" > env\nprintf '${port}\\n'\n`,
-    );
-    chmodSync(scriptPath, 0o755);
+    const scriptPath = createContextPortScript(tempDir, port);
 
     await expect(
       allocateWorkspaceServicePort({
@@ -109,9 +104,26 @@ describe("allocateWorkspaceServicePort", () => {
   function createPortScript(output: string): string {
     const tempDir = mkdtempSync(join(tmpdir(), "workspace-service-port-allocator-"));
     tempDirs.push(tempDir);
-    const scriptPath = join(tempDir, "portmake");
-    writeFileSync(scriptPath, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`);
-    chmodSync(scriptPath, 0o755);
+    const contents =
+      process.platform === "win32"
+        ? `@echo off\r\necho ${output}\r\n`
+        : `#!/bin/sh\nprintf '%s\\n' '${output}'\n`;
+    return writePortScript(tempDir, contents);
+  }
+
+  function createContextPortScript(tempDir: string, port: number): string {
+    const contents =
+      process.platform === "win32"
+        ? `@echo off\r\n<nul set /p "=%CD%" > cwd\r\n<nul set /p "=%~1|%~2|%~3|%~4" > argv\r\n<nul set /p "=%PASEO_SCRIPTNAME%|%PASEO_WORKSPACE_ID%|%PASEO_BRANCH_NAME%|%PASEO_WORKTREE_PATH%" > env\r\necho ${port}\r\n`
+        : `#!/bin/sh\nprintf '%s' "$PWD" > cwd\nprintf '%s|%s|%s|%s' "$1" "$2" "$3" "$4" > argv\nprintf '%s|%s|%s|%s' "$PASEO_SCRIPTNAME" "$PASEO_WORKSPACE_ID" "$PASEO_BRANCH_NAME" "$PASEO_WORKTREE_PATH" > env\nprintf '${port}\\n'\n`;
+    return writePortScript(tempDir, contents);
+  }
+
+  function writePortScript(tempDir: string, contents: string): string {
+    const fileName = process.platform === "win32" ? "portmake.cmd" : "portmake";
+    const scriptPath = join(tempDir, fileName);
+    writeFileSync(scriptPath, contents);
+    if (process.platform !== "win32") chmodSync(scriptPath, 0o755);
     return scriptPath;
   }
 });
