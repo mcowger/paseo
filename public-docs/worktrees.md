@@ -183,7 +183,7 @@ For an external allocator, configure `portScript` instead:
 ```
 
 Paseo runs the executable in the workspace directory with four arguments: service name, workspace
-ID, branch name, and worktree path. A missing branch is passed as an empty string. The same values
+ID, branch name, and worktree path. Since the script is executed directly without a shell, `portScript` must point to a real executable (such as a compiled binary or a script with a proper shebang line like `#!/bin/bash`) rather than an inline shell command or pipeline. If you need shell evaluation or pipelines, wrap them in a small executable script. A missing branch is passed as an empty string. The same values
 are available as `PASEO_SCRIPTNAME`, `PASEO_WORKSPACE_ID`, `PASEO_BRANCH_NAME`, and
 `PASEO_WORKTREE_PATH`. It must print one valid TCP port to stdout. `portScript` wins over `range` in
 the same block. Paseo trusts the external allocator, so the returned port may already be in use, for
