@@ -85,7 +85,9 @@ import {
   remapDraftCwdToWorkspace,
 } from "./new-workspace-fork-context";
 import {
+  buildBranchPickerItems,
   pickerItemToCheckoutRequest,
+  type BranchPickerDetail,
   type PickerCheckoutRequest,
   type PickerItem,
 } from "./new-workspace-picker-item";
@@ -116,7 +118,7 @@ function resolveCheckoutRequest(
   if (!currentBranch) return undefined;
   return {
     action: "branch-off",
-    refName: currentBranch,
+    refName: `refs/heads/${currentBranch}`,
   };
 }
 
@@ -333,6 +335,8 @@ function PickerOptionItem({
   disabled,
   onPress,
   isBranch,
+  trailingLabel,
+  accessibilityLabel,
   iconColor,
   iconSize,
 }: {
@@ -344,6 +348,8 @@ function PickerOptionItem({
   disabled: boolean;
   onPress: () => void;
   isBranch: boolean;
+  trailingLabel?: string;
+  accessibilityLabel?: string;
   iconColor: string;
   iconSize: number;
 }) {
@@ -359,6 +365,11 @@ function PickerOptionItem({
     ),
     [isBranch, iconSize, iconColor],
   );
+  const trailingSlot = useMemo(
+    () =>
+      trailingLabel ? <Text style={styles.refDivergenceLabel}>{trailingLabel}</Text> : undefined,
+    [trailingLabel],
+  );
   return (
     <ComboboxItem
       testID={testID}
@@ -369,6 +380,8 @@ function PickerOptionItem({
       disabled={disabled}
       onPress={onPress}
       leadingSlot={leadingSlot}
+      trailingSlot={trailingSlot}
+      accessibilityLabel={accessibilityLabel}
     />
   );
 }
@@ -517,6 +530,8 @@ function NewWorkspacePickerOption({
       disabled={isPending}
       onPress={onPress}
       isBranch={isBranch}
+      trailingLabel={isBranch ? item.divergenceLabel : undefined}
+      accessibilityLabel={isBranch ? item.accessibilityLabel : undefined}
       iconColor={theme.colors.foregroundMuted}
       iconSize={theme.iconSize.sm}
     />
@@ -604,7 +619,7 @@ function newWorkspaceHostOptionTestID(serverId: string): string {
 }
 
 function computePickerOptionData(
-  branchDetails: ReadonlyArray<{ name: string; committerDate: number }>,
+  branchDetails: readonly BranchPickerDetail[],
   prItems: ReadonlyArray<ForgeSearchItem>,
 ): PickerOptionData {
   const idMap = new Map<string, PickerItem>();
@@ -615,11 +630,12 @@ function computePickerOptionData(
   }
   const timedOptions: TimedOption[] = [];
 
-  for (const branch of branchDetails) {
+  for (const branch of buildBranchPickerItems(branchDetails)) {
+    if (branch.kind !== "branch") continue;
     const id = branchOptionId(branch.name);
     const option = { id, label: branch.name };
-    idMap.set(id, { kind: "branch", name: branch.name });
-    timedOptions.push({ option, timestamp: branch.committerDate });
+    idMap.set(id, branch);
+    timedOptions.push({ option, timestamp: branch.committerDate ?? 0 });
   }
 
   for (const pr of prItems) {
@@ -741,10 +757,8 @@ function getContentStyle(input: { isCompact: boolean; insetBottom: number }) {
 }
 
 function normalizeBranchDetails(
-  data:
-    | { branchDetails?: Array<{ name: string; committerDate: number }>; branches?: string[] }
-    | undefined,
-): Array<{ name: string; committerDate: number }> {
+  data: { branchDetails?: BranchPickerDetail[]; branches?: string[] } | undefined,
+): BranchPickerDetail[] {
   const details = data?.branchDetails;
   if (details && details.length > 0) return details;
   const names = data?.branches ?? [];
@@ -1712,11 +1726,11 @@ export function NewWorkspaceScreen({
   }, [currentBranch, selectedItem]);
 
   const selectedOptionId = useMemo(() => {
-    if (!selectedItem) return "";
+    if (!selectedItem) return currentBranch ? branchOptionId(currentBranch) : "";
     return selectedItem.kind === "branch"
       ? branchOptionId(selectedItem.name)
       : prOptionId(selectedItem.item.number);
-  }, [selectedItem]);
+  }, [currentBranch, selectedItem]);
   const selectPickerItem = useCallback(
     (item: PickerItem) => {
       const nextAttachments = syncPickerPrAttachment({
@@ -2253,6 +2267,11 @@ const styles = StyleSheet.create((theme) => ({
   tooltipText: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.popoverForeground,
+  },
+  refDivergenceLabel: {
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
+    fontVariant: ["tabular-nums"],
   },
   badgeIconBox: {
     width: theme.iconSize.md,
