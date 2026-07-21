@@ -666,6 +666,32 @@ describe("PiRpcAgentSession", () => {
     );
   });
 
+  test("treats Pi's aborted terminal response as cancellation after an interrupt", async () => {
+    const { pi, session, events } = await createSession();
+    const fakeSession = pi.latestSession();
+    fakeSession.abort = async () => {
+      fakeSession.finishTurn({
+        role: "assistant",
+        provider: "openai-responses",
+        model: "gpt-5.6-terra",
+        responseId: "resp-aborted",
+        stopReason: "aborted",
+        errorMessage: "OpenAI Responses stream ended before a terminal response event",
+        content: [],
+      });
+    };
+
+    const { turnId } = await session.startTurn("stop this turn");
+    await session.interrupt();
+
+    await expect(events.nextTurnCancellation()).resolves.toEqual({
+      type: "turn_canceled",
+      provider: "pi",
+      reason: "interrupted",
+      turnId,
+    });
+  });
+
   test("adds Pi assistant context to generic provider finish errors", async () => {
     const { pi, session, events } = await createSession();
 

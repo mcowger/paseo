@@ -813,6 +813,11 @@ function latestPiErrorMessage(messages: PiAgentMessage[]): string | null {
   return formatPiErrorMessage(latestAssistant);
 }
 
+function isPiAbortedTerminalResponse(messages: PiAgentMessage[]): boolean {
+  const latestAssistant = messages.findLast((message) => message.role === "assistant");
+  return latestAssistant?.stopReason?.toLowerCase() === "aborted";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1207,6 +1212,10 @@ export class PiRpcAgentSession implements AgentSession {
   private state: PiSessionState;
   private readonly currentModeId: string | null;
   private closed = false;
+  // Pi reports an aborted OpenAI Responses stream before the abort RPC resolves.
+  // Keep the turn active until that RPC acknowledges the user-requested cancellation.
+  private interruptingTurnId: string | null = null;
+  private interruptedTerminalError: { turnId: string; error: string } | null = null;
 
   constructor(options: PiRpcAgentSessionOptions) {
     this.runtimeSession = options.runtimeSession;
@@ -1400,7 +1409,32 @@ export class PiRpcAgentSession implements AgentSession {
 
   async interrupt(): Promise<void> {
     const turnId = this.activeTurnId;
-    await this.runtimeSession.abort();
+    if (turnId) {
+      this.interruptingTurnId = turnId;
+    }
+    try {
+      await this.runtimeSession.abort();
+    } catch (error) {
+      if (this.interruptingTurnId === turnId) {
+        this.interruptingTurnId = null;
+      }
+      if (this.interruptedTerminalError?.turnId === turnId) {
+        const terminalError = this.interruptedTerminalError;
+        this.interruptedTerminalError = null;
+        this.activeTurnId = null;
+        this.activeClientMessageId = null;
+        this.activeTurnStarted = false;
+        this.activeAssistantMessageId = null;
+        this.clearNoTurnBuffers();
+        this.emit({
+          type: "turn_failed",
+          provider: this.provider,
+          turnId,
+          error: terminalError.error,
+        });
+      }
+      throw error;
+    }
     if (turnId && this.activeTurnId === turnId) {
       this.activeTurnId = null;
       this.activeClientMessageId = null;
@@ -1413,6 +1447,12 @@ export class PiRpcAgentSession implements AgentSession {
         reason: "interrupted",
         turnId,
       });
+    }
+    if (this.interruptingTurnId === turnId) {
+      this.interruptingTurnId = null;
+    }
+    if (this.interruptedTerminalError?.turnId === turnId) {
+      this.interruptedTerminalError = null;
     }
   }
 
@@ -2238,6 +2278,13 @@ export class PiRpcAgentSession implements AgentSession {
   }
 
   private completeTurn(turnId: string | undefined, messages: PiAgentMessage[]): void {
+    if (turnId && this.interruptingTurnId === turnId && isPiAbortedTerminalResponse(messages)) {
+      this.interruptedTerminalError = {
+        turnId,
+        error: latestPiErrorMessage(messages) ?? "Pi turn failed",
+      };
+      return;
+    }
     this.activeTurnId = null;
     this.activeClientMessageId = null;
     this.activeAssistantMessageId = null;
