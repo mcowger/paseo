@@ -97,6 +97,15 @@ function turnEventSignatures(events: AgentStreamEvent[]): TurnEventSignature[] {
   return events.map((event) => [event.type, "turnId" in event ? event.turnId : undefined]);
 }
 
+function hasTurnCompleted(events: AgentStreamEvent[]): boolean {
+  for (const event of events) {
+    if (event.type === "turn_completed") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function userMessageEvents(params: {
   sessionId: string;
   messageId: string;
@@ -2724,6 +2733,65 @@ describe("OpenCode provider subagent contract", () => {
       );
       expect(openCode.calls.sessionAbort).toEqual([]);
       expect(openCode.calls.sessionPromptAsync).toEqual([]);
+    } finally {
+      await parent.close();
+    }
+  });
+
+  test("does not start a new autonomous turn when post-turn user message updates arrive for an already emitted message", async () => {
+    const { parent, openCode } = await createParentSession("ses_parent_post_turn");
+    openCode.sessionPromptAsyncEvents = [
+      ...userMessageEvents({
+        sessionId: "ses_parent_post_turn",
+        messageId: "msg_user_1",
+        text: "Hello OpenCode",
+      }),
+      ...assistantTurnEvents({
+        sessionId: "ses_parent_post_turn",
+        text: "Response from OpenCode",
+      }),
+    ];
+    const events: AgentStreamEvent[] = [];
+    const streamDrained = createTestDeferred<void>();
+    parent.subscribe((event) => {
+      events.push(event);
+      if (event.type === "provider_subagent") {
+        streamDrained.resolve();
+      }
+    });
+
+    try {
+      await parent.startTurn("Hello OpenCode");
+
+      await vi.waitFor(() => {
+        expect(hasTurnCompleted(events)).toBe(true);
+      });
+
+      // Post-turn message update for the same user message ID that already completed
+      openCode.emitEvent({
+        type: "message.updated",
+        properties: {
+          info: { id: "msg_user_1", sessionID: "ses_parent_post_turn", role: "user" },
+        },
+      });
+
+      openCode.emitEvent({
+        type: "session.created",
+        properties: {
+          info: {
+            id: "ses_child_drain_marker",
+            parentID: "ses_parent_post_turn",
+            title: "Stream drain marker",
+            directory: "/workspace/repo",
+          },
+        },
+      });
+
+      await streamDrained.promise;
+
+      // Verify that no new turn_started was emitted after turn_completed
+      const turnStartedCount = events.filter((e) => e.type === "turn_started").length;
+      expect(turnStartedCount).toBe(1);
     } finally {
       await parent.close();
     }
