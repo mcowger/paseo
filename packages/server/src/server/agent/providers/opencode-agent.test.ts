@@ -97,15 +97,6 @@ function turnEventSignatures(events: AgentStreamEvent[]): TurnEventSignature[] {
   return events.map((event) => [event.type, "turnId" in event ? event.turnId : undefined]);
 }
 
-function hasTurnCompleted(events: AgentStreamEvent[]): boolean {
-  for (const event of events) {
-    if (event.type === "turn_completed") {
-      return true;
-    }
-  }
-  return false;
-}
-
 function userMessageEvents(params: {
   sessionId: string;
   messageId: string;
@@ -2764,7 +2755,7 @@ describe("OpenCode provider subagent contract", () => {
       await parent.startTurn("Hello OpenCode");
 
       await vi.waitFor(() => {
-        expect(hasTurnCompleted(events)).toBe(true);
+        expect(events.some((e) => e.type === "turn_completed")).toBe(true);
       });
 
       // Post-turn message update for the same user message ID that already completed
