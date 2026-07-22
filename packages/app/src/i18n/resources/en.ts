@@ -365,6 +365,13 @@ export const en = {
       copyBranchName: "Copy branch name",
       copied: "Copied",
     },
+    fileActions: {
+      openFile: "Open file",
+      copyPath: "Copy path",
+      download: "Download",
+      addToChat: "Add to chat…",
+      moreActions: "More actions",
+    },
     fileExplorer: {
       sort: {
         name: "Name",
@@ -374,8 +381,6 @@ export const en = {
       context: {
         size: "Size",
         modified: "Modified",
-        copyPath: "Copy path",
-        download: "Download",
       },
       actions: {
         back: "Back",
@@ -798,12 +803,12 @@ export const en = {
         deletedFile: "Deleted",
         commits: {
           title: "Commits",
-          countLabel: "{{count}} commits ahead of base",
+          countLabel: "{{count}} recent commits",
           fileDiffEmpty: "No changes to display",
           fileDiffError: "Failed to load file diff",
           loading: "Loading commits…",
           loadError: "Failed to load commits",
-          empty: "No commits ahead of base",
+          empty: "No commits yet",
         },
       },
       openInEditor: {
@@ -936,6 +941,8 @@ export const en = {
       actions: {
         menu: "Workspace actions",
         newWorkspace: "New workspace",
+        showMore: "Show more",
+        showLess: "Show less",
         createWorkspaceFor: "Create a new workspace for {{projectName}}",
         copyPath: "Copy path",
         copyBranchName: "Copy branch name",

@@ -366,6 +366,13 @@ export const zhCN: TranslationResources = {
       copyBranchName: "复制分支名称",
       copied: "已复制",
     },
+    fileActions: {
+      openFile: "打开文件",
+      copyPath: "复制路径",
+      download: "下载",
+      addToChat: "添加到聊天…",
+      moreActions: "更多操作",
+    },
     fileExplorer: {
       sort: {
         name: "名称",
@@ -375,8 +382,6 @@ export const zhCN: TranslationResources = {
       context: {
         size: "大小",
         modified: "修改时间",
-        copyPath: "复制路径",
-        download: "下载",
       },
       actions: {
         back: "返回",
@@ -780,12 +785,12 @@ export const zhCN: TranslationResources = {
         deletedFile: "已删除",
         commits: {
           title: "提交",
-          countLabel: "领先基线 {{count}} 个提交",
+          countLabel: "最近 {{count}} 个提交",
           fileDiffEmpty: "没有可显示的更改",
           fileDiffError: "加载文件差异失败",
           loading: "正在加载提交…",
           loadError: "加载提交失败",
-          empty: "没有领先基线的提交",
+          empty: "暂无提交",
         },
       },
       openInEditor: {
@@ -916,6 +921,8 @@ export const zhCN: TranslationResources = {
       actions: {
         menu: "Workspace 操作",
         newWorkspace: "新建 workspace",
+        showMore: "显示更多",
+        showLess: "收起",
         createWorkspaceFor: "为 {{projectName}} 新建 workspace",
         copyPath: "复制路径",
         copyBranchName: "复制分支名称",
