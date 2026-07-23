@@ -2755,7 +2755,7 @@ describe("OpenCode provider subagent contract", () => {
       await parent.startTurn("Hello OpenCode");
 
       await vi.waitFor(() => {
-        expect(events.some((e) => e.type === "turn_completed")).toBe(true);
+        expect(events).toContainEqual(expect.objectContaining({ type: "turn_completed" }));
       });
 
       // Post-turn message update for the same user message ID that already completed
