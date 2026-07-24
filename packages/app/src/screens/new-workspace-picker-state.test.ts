@@ -65,7 +65,12 @@ describe("syncPickerPrAttachment", () => {
     const issue = issueAttachment(44);
     const result = syncPickerPrAttachment({
       attachments: [issue],
-      item: { kind: "branch", name: "dev" },
+      item: {
+        kind: "branch",
+        name: "dev",
+        refName: "refs/heads/dev",
+        accessibilityLabel: "dev, local branch",
+      },
     });
     expect(result).toEqual([issue]);
   });
@@ -85,7 +90,12 @@ describe("syncPickerPrAttachment", () => {
     const issue = issueAttachment(44);
     const result = syncPickerPrAttachment({
       attachments: [issue, prAttachment(pr, "new-workspace-picker")],
-      item: { kind: "branch", name: "dev" },
+      item: {
+        kind: "branch",
+        name: "dev",
+        refName: "refs/heads/dev",
+        accessibilityLabel: "dev, local branch",
+      },
     });
     expect(result).toEqual([issue]);
   });
