@@ -211,6 +211,9 @@ Single file, validated with `PersistedConfigSchema`.
     providers: Record<providerId, ProviderOverride>,
     metadataGeneration: {
       providers: [{ provider, model?, thinkingOptionId? }]
+    },
+    subagentPolicy: {
+      allowedModels: ["provider/model", ...]
     }
   },
   features: {
@@ -228,6 +231,8 @@ Single file, validated with `PersistedConfigSchema`.
 All fields are optional with sensible defaults.
 
 `agents.metadataGeneration.providers` controls the preferred structured-generation fallback order for daemon-side metadata tasks such as commit messages, PR text, branch names, and generated agent titles. Entries are tried first in the configured order, then Paseo falls through to dynamically discovered defaults and finally the current selection when available.
+
+`agents.subagentPolicy.allowedModels` restricts which `provider/model` pairs agent-initiated agent creation may select. Enforcement is agent-scoped: it only applies when the MCP tool session belongs to another agent (`callerAgentId` present). It covers every path an agent can use to pin a model — `create_agent`, `update_agent` (switching a subagent's model), and scheduled new-agent targets (`create_schedule`/`update_schedule`). Unallowed requests fail before any side effects with an error listing the permitted subagent models, and `list_models` is filtered to the allowlist for agent tool sessions. Top-level creations from the UI or CLI (`callerAgentId` null) are unaffected and retain full model access. Malformed allowlist entries (missing `provider/model`) are ignored with a logged warning. Omitting `subagentPolicy` or leaving `allowedModels` empty keeps subagent model selection unrestricted.
 
 Local speech model ids are intentionally narrow: STT uses `parakeet-tdt-0.6b-v2-int8`, TTS uses `kokoro-en-v0_19`, and turn detection uses the bundled Silero VAD model.
 

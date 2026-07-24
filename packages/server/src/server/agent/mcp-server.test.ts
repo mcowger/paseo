@@ -5696,3 +5696,396 @@ describe("agent snapshot MCP serialization", () => {
     expect(content).not.toContain("first answer");
   });
 });
+
+describe("subagent model allowlist", () => {
+  const logger = createTestLogger();
+  const parentAgent = {
+    id: "parent-agent",
+    cwd: process.cwd(),
+    workspaceId: "wks_parent",
+    provider: "codex",
+    currentModeId: "full-access",
+    config: {},
+  } as ManagedAgent;
+
+  it("rejects an agent-scoped create_agent with a disallowed model", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_agent");
+
+    await expect(
+      tool.handler({
+        title: "Child",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+      }),
+    ).rejects.toThrow("Model 'codex/gpt-5.4' is not permitted for subagents");
+    expect(spies.agentManager.createAgent).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent-scoped create_agent with an allowed model", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    spies.agentManager.createAgent.mockResolvedValue({
+      id: "child-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+      workspaceId: "wks_parent",
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_agent");
+
+    await tool.handler({
+      title: "Child",
+      provider: "codex/gpt-5.4-mini",
+      initialPrompt: "Do work",
+    });
+
+    expect(spies.agentManager.createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "codex", model: "gpt-5.4-mini" }),
+      undefined,
+      expect.objectContaining({ workspaceId: "wks_parent" }),
+    );
+  });
+
+  it("does not restrict top-level create_agent when no caller agent is present", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.createAgent.mockResolvedValue({
+      id: "top-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+      workspaceId: "workspace-created",
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Top" },
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      ensureWorkspaceForCreate: async () => "workspace-created",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_agent");
+
+    await tool.handler({
+      title: "Top",
+      provider: "codex/gpt-5.4",
+      initialPrompt: "Do work",
+      background: true,
+    });
+
+    expect(spies.agentManager.createAgent).toHaveBeenCalled();
+  });
+
+  it("filters list_models to the allowlist for agent-scoped sessions", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const { manager, stub } = createOpenCodeManager();
+    stub.listModels.mockResolvedValue([
+      { provider: "codex", id: "gpt-5.4", label: "GPT-5.4" },
+      { provider: "codex", id: "gpt-5.4-mini", label: "GPT-5.4 mini" },
+    ]);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "list_models");
+
+    const response = await tool.handler({ provider: "codex" });
+    expect(response.structuredContent.models).toEqual([
+      { provider: "codex", id: "gpt-5.4-mini", label: "GPT-5.4 mini" },
+    ]);
+  });
+
+  it("returns all list_models for top-level sessions", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const { manager, stub } = createOpenCodeManager();
+    stub.listModels.mockResolvedValue([
+      { provider: "codex", id: "gpt-5.4", label: "GPT-5.4" },
+      { provider: "codex", id: "gpt-5.4-mini", label: "GPT-5.4 mini" },
+    ]);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: manager,
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "list_models");
+
+    const response = await tool.handler({ provider: "codex" });
+    expect(response.structuredContent.models).toHaveLength(2);
+  });
+
+  it("rejects a disallowed model on an agent-scoped legacy create_agent shape", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_agent");
+
+    await expect(
+      tool.handler({
+        relationship: { kind: "subagent" },
+        workspace: { kind: "current" },
+        title: "Child",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+      }),
+    ).rejects.toThrow("Model 'codex/gpt-5.4' is not permitted for subagents");
+    expect(spies.agentManager.createAgent).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty allowlist as unrestricted for agent-scoped create_agent", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    spies.agentManager.createAgent.mockResolvedValue({
+      id: "child-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+      workspaceId: "wks_parent",
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: [] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_agent");
+
+    await tool.handler({
+      title: "Child",
+      provider: "codex/gpt-5.4",
+      initialPrompt: "Do work",
+    });
+
+    expect(spies.agentManager.createAgent).toHaveBeenCalled();
+  });
+
+  it("ignores malformed allowlist entries while enforcing valid ones", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    spies.agentManager.createAgent.mockResolvedValue({
+      id: "child-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+      workspaceId: "wks_parent",
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      // "codex" has no model and is inert; the valid entry still enforces.
+      subagentPolicy: { allowedModels: ["codex", "codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_agent");
+
+    await expect(
+      tool.handler({
+        title: "Child",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+      }),
+    ).rejects.toThrow("Model 'codex/gpt-5.4' is not permitted for subagents");
+
+    await tool.handler({
+      title: "Child",
+      provider: "codex/gpt-5.4-mini",
+      initialPrompt: "Do work",
+    });
+    expect(spies.agentManager.createAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an agent-scoped update_agent onto a disallowed model", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "child-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "update_agent");
+
+    await expect(
+      tool.handler({ agentId: "child-agent", settings: { model: "gpt-5.4" } }),
+    ).rejects.toThrow("Model 'codex/gpt-5.4' is not permitted for subagents");
+    expect(spies.agentManager.setAgentModel).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent-scoped update_agent onto an allowed model", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "child-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "update_agent");
+
+    await tool.handler({ agentId: "child-agent", settings: { model: "gpt-5.4-mini" } });
+    expect(spies.agentManager.setAgentModel).toHaveBeenCalledWith("child-agent", "gpt-5.4-mini");
+  });
+
+  it("does not restrict update_agent for top-level sessions", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "child-agent",
+      provider: "codex",
+      cwd: process.cwd(),
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "update_agent");
+
+    await tool.handler({ agentId: "child-agent", settings: { model: "gpt-5.4" } });
+    expect(spies.agentManager.setAgentModel).toHaveBeenCalledWith("child-agent", "gpt-5.4");
+  });
+
+  it("rejects an agent-scoped create_schedule with a disallowed explicit model", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    const createOrReplace = vi.fn();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: { createOrReplace } as unknown as ScheduleService,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_schedule");
+
+    await expect(
+      tool.handler({
+        prompt: "say hello",
+        cron: "*/5 * * * *",
+        provider: "codex/gpt-5.4",
+      }),
+    ).rejects.toThrow("Model 'codex/gpt-5.4' is not permitted for subagents");
+    expect(createOrReplace).not.toHaveBeenCalled();
+  });
+
+  it("allows an agent-scoped create_schedule with an allowed explicit model", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    const createOrReplace = vi.fn(async (input: CreateScheduleInput) =>
+      createStoredSchedule(input),
+    );
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: { createOrReplace } as unknown as ScheduleService,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "create_schedule");
+
+    await tool.handler({
+      prompt: "say hello",
+      cron: "*/5 * * * *",
+      provider: "codex/gpt-5.4-mini",
+    });
+    expect(createOrReplace).toHaveBeenCalled();
+  });
+
+  it("rejects an agent-scoped update_schedule onto a disallowed model", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const stored: StoredSchedule = {
+      id: "schedule-1",
+      name: "test schedule",
+      prompt: "say hello",
+      cadence: { type: "every", everyMs: 300000 },
+      target: { type: "new-agent", config: { provider: "codex", cwd: "/tmp" } },
+      status: "active",
+      createdAt: "2026-04-11T00:00:00.000Z",
+      updatedAt: "2026-04-11T00:00:00.000Z",
+      nextRunAt: "2026-04-11T00:05:00.000Z",
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    };
+    const update = vi.fn();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: { update, inspect: vi.fn(async () => stored) } as unknown as ScheduleService,
+      callerAgentId: "parent-agent",
+      subagentPolicy: { allowedModels: ["codex/gpt-5.4-mini"] },
+      logger,
+    });
+    const tool = registeredTool(server, "update_schedule");
+
+    await expect(tool.handler({ id: "schedule-1", model: "gpt-5.4" })).rejects.toThrow(
+      "Model 'codex/gpt-5.4' is not permitted for subagents",
+    );
+    expect(update).not.toHaveBeenCalled();
+  });
+});

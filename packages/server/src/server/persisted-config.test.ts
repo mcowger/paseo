@@ -251,6 +251,33 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
       ],
     });
   });
+
+  test("accepts a subagent policy model allowlist", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        subagentPolicy: {
+          allowedModels: ["codex/gpt-5.4-mini", "claude/claude-3-5-haiku"],
+        },
+      },
+    });
+
+    expect(parsed.agents?.subagentPolicy).toEqual({
+      allowedModels: ["codex/gpt-5.4-mini", "claude/claude-3-5-haiku"],
+    });
+  });
+
+  test("rejects unknown subagent policy keys", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        subagentPolicy: {
+          allowedModels: ["codex/gpt-5.4-mini"],
+          unexpected: true,
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("provider overrides (new format)", () => {

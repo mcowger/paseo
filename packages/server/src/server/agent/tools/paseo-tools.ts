@@ -32,6 +32,7 @@ import {
 import { createAgentCommand, type CreateAgentFromMcpInput } from "../create-agent/create.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { FirstAgentContext } from "../../messages.js";
+import type { SubagentPolicy } from "../../persisted-config.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
 import { expandUserPath, isSameOrDescendantPath, resolvePathFromBase } from "../../path-utils.js";
 import type { TerminalManager } from "../../../terminal/terminal-manager.js";
@@ -127,6 +128,11 @@ export interface PaseoToolHostDependencies {
   browserToolsBroker?: BrowserToolsBroker | null;
   paseoHome?: string;
   worktreesRoot?: string;
+  /**
+   * Optional global policy restricting which provider/model pairs agent-initiated
+   * create_agent calls may select. Enforced only for agent-scoped tool sessions.
+   */
+  subagentPolicy?: SubagentPolicy;
   /**
    * ID of the agent that is using this tool catalog.
    * Used for cwd/mode inheritance when agents spawn child agents.
@@ -550,6 +556,55 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
   } = options;
   const childLogger = logger.child({ module: "agent", component: "paseo-tool-catalog" });
   const callerContext = callerAgentId ? (resolveCallerContext?.(callerAgentId) ?? null) : null;
+
+  // The subagent model allowlist only applies to agent-initiated (agent-scoped)
+  // tool sessions. Top-level human creations run with a null callerAgentId and
+  // keep full model access.
+  const canonicalizeProviderModel = (value: string): string | null => {
+    try {
+      const { provider, model } = resolveRequiredProviderModel(value);
+      return `${provider}/${model}`;
+    } catch {
+      return null;
+    }
+  };
+  const subagentAllowedModels = new Set<string>();
+  if (callerAgentId && options.subagentPolicy?.allowedModels) {
+    for (const entry of options.subagentPolicy.allowedModels) {
+      const canonical = canonicalizeProviderModel(entry);
+      if (canonical) {
+        subagentAllowedModels.add(canonical);
+      } else {
+        childLogger.warn(
+          { entry },
+          "Ignoring malformed subagentPolicy.allowedModels entry; expected provider/model (for example codex/gpt-5.4-mini)",
+        );
+      }
+    }
+  }
+  const isSubagentPolicyEnforced = subagentAllowedModels.size > 0;
+  const assertSubagentModelAllowed = (providerModel: string): void => {
+    if (!isSubagentPolicyEnforced) {
+      return;
+    }
+    const canonical = canonicalizeProviderModel(providerModel) ?? providerModel.trim();
+    if (!subagentAllowedModels.has(canonical)) {
+      throw new Error(
+        `Model '${canonical}' is not permitted for subagents. Permitted subagent models: ${[...subagentAllowedModels].join(", ")}. Retry with one of these models.`,
+      );
+    }
+  };
+  const filterSubagentModels = <T extends { provider?: string; id: string }>(
+    providerId: string,
+    models: T[],
+  ): T[] => {
+    if (!isSubagentPolicyEnforced) {
+      return models;
+    }
+    return models.filter((model) =>
+      subagentAllowedModels.has(`${model.provider ?? providerId}/${model.id}`),
+    );
+  };
 
   const parseToolInput = async (tool: PaseoToolDefinition, input: unknown): Promise<unknown> => {
     const inputSchema = tool.inputSchema;
@@ -1540,6 +1595,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         // COMPAT(nestedCreateAgentPlacement): accept the old relationship/workspace shape without
         // advertising it to models. Added in v0.2.0; remove after 2027-01-17.
         const parsed = legacyAgentToAgentCreateAgentArgsSchema.parse(args);
+        // Enforce the subagent model allowlist on pure input before any workspace side
+        // effects (worktree/workspace provisioning) so a rejected create leaves no residue.
+        assertSubagentModelAllowed(parsed.provider);
         const { cwd, workspaceId, worktree } = await resolveCreateAgentWorkspace(parsed.workspace, {
           prompt: parsed.initialPrompt,
         });
@@ -1553,6 +1611,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         };
       }
       const parsed = agentToAgentCreateAgentArgsSchema.parse(args);
+      assertSubagentModelAllowed(parsed.provider);
       const { cwd, workspaceId } = await resolveCanonicalCreateAgentWorkspace(parsed.workspaceId, {
         prompt: parsed.initialPrompt,
       });
@@ -2140,6 +2199,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, name, labels, settings }) => {
+      // Closes the create-then-update bypass: an agent-scoped caller cannot switch a
+      // subagent onto a disallowed model. settings.model is a bare model id, so resolve
+      // the target agent's provider to build the canonical provider/model pair.
+      if (isSubagentPolicyEnforced && typeof settings?.model === "string") {
+        const targetAgent = agentManager.getAgent(agentId);
+        if (!targetAgent) {
+          throw new Error(`Agent ${agentId} not found`);
+        }
+        assertSubagentModelAllowed(`${targetAgent.provider}/${settings.model}`);
+      }
       if (settings?.modeId !== undefined) {
         await agentManager.setAgentMode(agentId, settings.modeId);
       }
@@ -2530,13 +2599,19 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       }
 
       const expiresAt = buildScheduleExpiry(expiresIn);
+      const target = resolveNewAgentScheduleTarget({ provider, cwd, isolation });
+      // A scheduled new-agent target spawns an agent on every tick; enforce the allowlist
+      // at creation time when an explicit model is selected.
+      if (isSubagentPolicyEnforced && typeof target.config.model === "string") {
+        assertSubagentModelAllowed(`${target.config.provider}/${target.config.model}`);
+      }
       const schedule = await scheduleService.createOrReplace({
         prompt: prompt.trim(),
         cadence: buildCronScheduleCadence({
           cron,
           ...(timezone !== undefined ? { timezone } : {}),
         }),
-        target: resolveNewAgentScheduleTarget({ provider, cwd, isolation }),
+        target,
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
@@ -2807,8 +2882,20 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         throw new Error("Schedule service is not configured");
       }
 
-      await requireScheduleTarget(input.id, "new-agent");
-      const schedule = await scheduleService.update(buildScheduleUpdateInput(input));
+      const existing = await requireScheduleTarget(input.id, "new-agent");
+      const updateInput = buildScheduleUpdateInput(input);
+      // Mirror create_schedule: block switching a scheduled new-agent target onto a
+      // disallowed model. Provider may be unchanged in the patch, so fall back to the
+      // existing target's provider to build the canonical pair.
+      if (isSubagentPolicyEnforced && typeof updateInput.newAgentConfig?.model === "string") {
+        const nextProvider =
+          updateInput.newAgentConfig.provider ??
+          (existing.target.type === "new-agent" ? existing.target.config.provider : undefined);
+        if (nextProvider) {
+          assertSubagentModelAllowed(`${nextProvider}/${updateInput.newAgentConfig.model}`);
+        }
+      }
+      const schedule = await scheduleService.update(updateInput);
 
       return {
         content: [],
@@ -2907,7 +2994,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: [],
         structuredContent: ensureValidJson({
           provider,
-          models,
+          models: filterSubagentModels(provider, models),
         }),
       };
     },

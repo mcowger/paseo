@@ -171,6 +171,14 @@ const AgentMetadataGenerationSchema = z
   })
   .strict();
 
+const SubagentPolicySchema = z
+  .object({
+    allowedModels: z.array(z.string().trim().min(1)).optional(),
+  })
+  .strict();
+
+export type SubagentPolicy = z.infer<typeof SubagentPolicySchema>;
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -301,6 +309,7 @@ export const PersistedConfigSchema = z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
+        subagentPolicy: SubagentPolicySchema.optional(),
       })
       .strict()
       .optional(),
