@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type BrowserContext, type Page } from "@playwright/test";
 import type { DaemonClient as InternalDaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { decodeWorkspaceIdFromPathSegment } from "@/utils/host-routes";
 import { connectDaemonClient } from "./daemon-client-loader";
@@ -17,6 +17,8 @@ type NewWorkspaceDaemonClient = Pick<
   | "fetchWorkspaces"
   | "getPaseoWorktreeList"
   | "getDaemonConfig"
+  | "inspectWorkspaceRecovery"
+  | "on"
   | "patchDaemonConfig"
   | "removeProject"
 >;
@@ -87,9 +89,12 @@ function parseWorkspaceIdFromPageUrl(page: Page, serverId: string): string | nul
   return decodeWorkspaceIdFromPathSegment(match[1]);
 }
 
-export async function connectNewWorkspaceDaemonClient(): Promise<NewWorkspaceDaemonClient> {
+export async function connectNewWorkspaceDaemonClient(options?: {
+  port?: number;
+}): Promise<NewWorkspaceDaemonClient> {
   return connectDaemonClient<NewWorkspaceDaemonClient>({
     clientIdPrefix: "app-e2e-new-workspace",
+    port: options?.port,
   });
 }
 
@@ -181,6 +186,21 @@ export async function expectNewWorkspaceProjectSelected(
   await expect(projectPicker).toContainText(projectDisplayName);
 }
 
+export async function fillNewWorkspaceDraft(page: Page, draft: string): Promise<void> {
+  const composer = page.getByRole("textbox", { name: "Message agent..." });
+  await expect(composer).toBeVisible({ timeout: 30_000 });
+  await composer.fill(draft);
+}
+
+export async function expectNewWorkspaceDraft(page: Page, draft: string): Promise<void> {
+  await expect(page.getByRole("textbox", { name: "Message agent..." })).toHaveValue(draft);
+}
+
+export async function selectNewWorkspaceHost(page: Page, hostLabel: string): Promise<void> {
+  await page.getByTestId("host-picker-trigger").click();
+  await page.getByText(hostLabel, { exact: true }).click();
+}
+
 export async function submitNewWorkspacePrompt(
   page: Page,
   prompt = "Hello from e2e",
@@ -270,6 +290,13 @@ export async function selectBranchInPicker(page: Page, name: string): Promise<vo
   await branchRow.click();
 }
 
+export async function searchAndSelectBranchInPicker(page: Page, name: string): Promise<void> {
+  const searchInput = page.getByPlaceholder("Search branches and PRs");
+  await expect(searchInput).toBeVisible({ timeout: 30_000 });
+  await searchInput.fill(name);
+  await selectBranchInPicker(page, name);
+}
+
 export async function selectGitHubPrInPicker(page: Page, number: number): Promise<void> {
   const prRow = page.getByTestId(`new-workspace-ref-picker-pr-${number}`);
   await expect(prRow).toBeVisible({ timeout: 30_000 });
@@ -329,6 +356,18 @@ export async function expectComposerGithubAttachmentPill(
   await expect(pills).toHaveCount(1);
   await expect(pills.first()).toContainText(`#${input.number}`);
   await expect(pills.first()).toContainText(input.title);
+}
+
+export async function pasteGithubPrUrl(
+  page: Page,
+  context: BrowserContext,
+  url: string,
+): Promise<void> {
+  const composer = page.getByRole("textbox", { name: "Message agent..." });
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.evaluate((value) => navigator.clipboard.writeText(value), url);
+  await composer.focus();
+  await page.keyboard.press("Control+V");
 }
 
 export async function assertNewWorkspaceSidebarAndHeader(

@@ -2,10 +2,10 @@ import equal from "fast-deep-equal";
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { ViewedTimelineUiBridge } from "@/timeline/viewed-timeline-sync";
 import type { AgentDirectoryEntry } from "@/types/agent-directory";
 import {
-  appendOptimisticUserMessageToStream,
-  type OptimisticUserMessagePlacement,
+  handoffCreatedAgentUserMessageToStream,
   type StreamItem,
   type UserMessageItem,
 } from "@/types/stream";
@@ -37,6 +37,10 @@ import {
   createAgentLastActivityCoalescer,
   type AgentLastActivityCommitter,
 } from "@/runtime/activity";
+import {
+  buildWorkspaceAgentActivityIndex,
+  type WorkspaceAgentActivity,
+} from "@/utils/workspace-agent-activity";
 
 // Re-export types that were in session-context
 export type MessageEntry =
@@ -131,6 +135,7 @@ export interface WorkspaceDescriptor {
   workspaceKind: WorkspaceDescriptorPayload["workspaceKind"];
   name: string;
   title?: string | null;
+  pinnedAt?: string | null;
   status: WorkspaceDescriptorPayload["status"];
   statusEnteredAt: Date | null;
   archivingAt: string | null;
@@ -138,6 +143,7 @@ export interface WorkspaceDescriptor {
   scripts: WorkspaceDescriptorPayload["scripts"];
   gitRuntime?: WorkspaceDescriptorPayload["gitRuntime"];
   githubRuntime?: WorkspaceDescriptorPayload["githubRuntime"];
+  forge?: WorkspaceDescriptorPayload["forge"];
   project?: ProjectPlacementPayload;
 }
 
@@ -163,6 +169,7 @@ export function normalizeWorkspaceDescriptor(
     workspaceKind: payload.workspaceKind,
     name: payload.name,
     title: payload.title ?? null,
+    pinnedAt: payload.pinnedAt ?? null,
     status: payload.status,
     statusEnteredAt,
     archivingAt: payload.archivingAt ?? null,
@@ -170,6 +177,7 @@ export function normalizeWorkspaceDescriptor(
     scripts: (payload.scripts ?? []).map((s) => Object.assign({}, s)),
     gitRuntime: payload.gitRuntime,
     githubRuntime: payload.githubRuntime,
+    forge: payload.forge,
     project: payload.project,
   };
 }
@@ -270,6 +278,8 @@ export interface ExplorerFile {
   kind: ExplorerFileKind;
   encoding: ExplorerEncoding;
   content?: string;
+  // TextDecoder removes a leading UTF-8 BOM; retain this bit so file writes can restore it.
+  hasBom: boolean;
   mimeType?: string;
   size: number;
   modifiedAt: string;
@@ -301,6 +311,7 @@ export interface DaemonServerInfo {
   serverId: string;
   hostname: string | null;
   version: string | null;
+  desktopManaged?: boolean;
   capabilities?: ServerCapabilities;
   features?: ServerInfoStatusPayload["features"];
 }
@@ -311,6 +322,20 @@ export interface AgentTimelineCursorState {
   endSeq: number;
 }
 
+export interface SessionReplicaTimeline {
+  agentId: string;
+  items: StreamItem[];
+  cursor: AgentTimelineCursorState | null;
+  hasOlder: boolean;
+}
+
+export interface SessionReplica {
+  agents: Map<string, Agent>;
+  workspaces: Map<string, WorkspaceDescriptor>;
+  emptyProjects: Map<string, EmptyProjectDescriptor>;
+  timeline: SessionReplicaTimeline | null;
+}
+
 export type WorkspaceRestoreStatus = "restoring" | "failed" | "needs-host-upgrade";
 
 // Per-session state
@@ -319,6 +344,8 @@ export interface SessionState {
 
   // Daemon client (immutable reference)
   client: DaemonClient | null;
+  clientGeneration: number;
+  viewedTimelineSync: ViewedTimelineUiBridge | null;
 
   // Server metadata (from server_info handshake)
   serverInfo: DaemonServerInfo | null;
@@ -353,6 +380,7 @@ export interface SessionState {
 
   // Agents
   agents: Map<string, Agent>;
+  workspaceAgentActivity: Map<string, WorkspaceAgentActivity>;
   agentDetails: Map<string, Agent>;
   workspaces: Map<string, WorkspaceDescriptor>;
   // Project parents with no active workspaces, keyed by projectId. The
@@ -386,10 +414,16 @@ interface SessionStoreState {
 // Action types
 interface SessionStoreActions {
   // Session management
-  initializeSession: (serverId: string, client: DaemonClient) => void;
+  initializeSession: (
+    serverId: string,
+    client: DaemonClient | null,
+    clientGeneration?: number,
+  ) => void;
+  restoreSessionReplica: (serverId: string, replica: SessionReplica) => void;
   clearSession: (serverId: string) => void;
   getSession: (serverId: string) => SessionState | undefined;
-  updateSessionClient: (serverId: string, client: DaemonClient) => void;
+  updateSessionClient: (serverId: string, client: DaemonClient, clientGeneration?: number) => void;
+  setViewedTimelineSync: (serverId: string, sync: ViewedTimelineUiBridge | null) => void;
   updateSessionServerInfo: (serverId: string, info: DaemonServerInfo) => void;
 
   // Audio state
@@ -427,14 +461,10 @@ interface SessionStoreActions {
     agentId: string,
     state: { tail?: StreamItem[]; head?: StreamItem[] },
   ) => void;
-  appendOptimisticUserMessageToAgentStream: (
+  handoffCreatedAgentUserMessage: (
     serverId: string,
     agentId: string,
     message: UserMessageItem,
-    options: {
-      placement: OptimisticUserMessagePlacement;
-      skipIfUserMessageExists?: boolean;
-    },
   ) => boolean;
   clearAgentStreamHead: (serverId: string, agentId: string) => void;
   setAgentTimelineCursor: (
@@ -538,10 +568,16 @@ type SessionStore = SessionStoreState & SessionStoreActions;
 const agentLastActivityCoalescer = createAgentLastActivityCoalescer();
 
 // Helper to create initial session state
-function createInitialSessionState(serverId: string, client: DaemonClient): SessionState {
+function createInitialSessionState(
+  serverId: string,
+  client: DaemonClient | null,
+  clientGeneration = 0,
+): SessionState {
   return {
     serverId,
     client,
+    clientGeneration,
+    viewedTimelineSync: null,
     serverInfo: null,
     hasHydratedAgents: false,
     hasHydratedWorkspaces: false,
@@ -560,6 +596,7 @@ function createInitialSessionState(serverId: string, client: DaemonClient): Sess
     agentAuthoritativeHistoryApplied: new Map(),
     initializingAgents: new Map(),
     agents: new Map(),
+    workspaceAgentActivity: new Map(),
     agentDetails: new Map(),
     workspaces: new Map(),
     emptyProjects: new Map(),
@@ -588,17 +625,26 @@ function isSessionServerInfoUnchanged(input: {
   currentServerInfo: SessionState["serverInfo"] | undefined;
   nextHostname: string | null;
   nextVersion: string | null;
+  nextDesktopManaged: boolean | undefined;
   nextCapabilities: ServerCapabilities | undefined;
   nextFeatures: ServerInfoStatusPayload["features"] | undefined;
   nextServerId: string;
 }): boolean {
-  const { currentServerInfo, nextHostname, nextVersion, nextCapabilities, nextFeatures } = input;
+  const {
+    currentServerInfo,
+    nextHostname,
+    nextVersion,
+    nextDesktopManaged,
+    nextCapabilities,
+    nextFeatures,
+  } = input;
   const prevHostname = currentServerInfo?.hostname?.trim() || null;
   const prevVersion = currentServerInfo?.version?.trim() || null;
   return (
     currentServerInfo?.serverId === input.nextServerId &&
     prevHostname === nextHostname &&
     prevVersion === nextVersion &&
+    currentServerInfo?.desktopManaged === nextDesktopManaged &&
     areServerCapabilitiesEqual(currentServerInfo?.capabilities, nextCapabilities) &&
     areServerInfoFeaturesEqual(currentServerInfo?.features, nextFeatures)
   );
@@ -635,7 +681,7 @@ export const useSessionStore = create<SessionStore>()(
       agentLastActivity: new Map(),
 
       // Session management
-      initializeSession: (serverId, client) => {
+      initializeSession: (serverId, client, clientGeneration) => {
         set((prev) => {
           if (prev.sessions[serverId]) {
             return prev;
@@ -644,8 +690,53 @@ export const useSessionStore = create<SessionStore>()(
             ...prev,
             sessions: {
               ...prev.sessions,
-              [serverId]: createInitialSessionState(serverId, client),
+              [serverId]: createInitialSessionState(serverId, client, clientGeneration),
             },
+          };
+        });
+      },
+
+      restoreSessionReplica: (serverId, replica) => {
+        set((prev) => {
+          if (prev.sessions[serverId]) {
+            return prev;
+          }
+          const session = createInitialSessionState(serverId, null);
+          const timeline = replica.timeline;
+          const agentStreamTail = new Map<string, StreamItem[]>();
+          const agentTimelineCursor = new Map<string, AgentTimelineCursorState>();
+          const agentTimelineHasOlder = new Map<string, boolean>();
+          const agentAuthoritativeHistoryApplied = new Map<string, boolean>();
+          const agentHistorySyncGeneration = new Map<string, number>();
+          if (timeline) {
+            agentStreamTail.set(timeline.agentId, timeline.items);
+            agentTimelineHasOlder.set(timeline.agentId, timeline.hasOlder);
+            agentAuthoritativeHistoryApplied.set(timeline.agentId, true);
+            agentHistorySyncGeneration.set(timeline.agentId, session.historySyncGeneration);
+            if (timeline.cursor) agentTimelineCursor.set(timeline.agentId, timeline.cursor);
+          }
+          const agentLastActivity = new Map(prev.agentLastActivity);
+          for (const agent of replica.agents.values()) {
+            agentLastActivity.set(agent.id, agent.lastActivityAt);
+          }
+          return {
+            ...prev,
+            sessions: {
+              ...prev.sessions,
+              [serverId]: {
+                ...session,
+                agents: replica.agents,
+                workspaceAgentActivity: buildWorkspaceAgentActivityIndex(replica.agents),
+                workspaces: replica.workspaces,
+                emptyProjects: replica.emptyProjects,
+                agentStreamTail,
+                agentTimelineCursor,
+                agentTimelineHasOlder,
+                agentAuthoritativeHistoryApplied,
+                agentHistorySyncGeneration,
+              },
+            },
+            agentLastActivity,
           };
         });
       },
@@ -684,7 +775,7 @@ export const useSessionStore = create<SessionStore>()(
         });
       },
 
-      updateSessionClient: (serverId, client) => {
+      updateSessionClient: (serverId, client, clientGeneration = 0) => {
         set((prev) => {
           const session = prev.sessions[serverId];
 
@@ -692,7 +783,7 @@ export const useSessionStore = create<SessionStore>()(
             return prev;
           }
 
-          if (session.client === client) {
+          if (session.client === client && session.clientGeneration === clientGeneration) {
             return prev;
           }
 
@@ -703,7 +794,24 @@ export const useSessionStore = create<SessionStore>()(
               [serverId]: {
                 ...session,
                 client,
+                clientGeneration,
               },
+            },
+          };
+        });
+      },
+
+      setViewedTimelineSync: (serverId, viewedTimelineSync) => {
+        set((prev) => {
+          const session = prev.sessions[serverId];
+          if (!session || session.viewedTimelineSync === viewedTimelineSync) {
+            return prev;
+          }
+          return {
+            ...prev,
+            sessions: {
+              ...prev.sessions,
+              [serverId]: { ...session, viewedTimelineSync },
             },
           };
         });
@@ -718,6 +826,7 @@ export const useSessionStore = create<SessionStore>()(
 
           const nextHostname = info.hostname?.trim() || null;
           const nextVersion = info.version?.trim() || null;
+          const nextDesktopManaged = info.desktopManaged;
           const nextCapabilities = info.capabilities;
           const nextFeatures = info.features;
 
@@ -726,6 +835,7 @@ export const useSessionStore = create<SessionStore>()(
               currentServerInfo: session.serverInfo,
               nextHostname,
               nextVersion,
+              nextDesktopManaged,
               nextCapabilities,
               nextFeatures,
               nextServerId: info.serverId,
@@ -744,6 +854,9 @@ export const useSessionStore = create<SessionStore>()(
                   serverId: info.serverId,
                   hostname: nextHostname,
                   version: nextVersion,
+                  ...(nextDesktopManaged !== undefined
+                    ? { desktopManaged: nextDesktopManaged }
+                    : {}),
                   ...(nextCapabilities ? { capabilities: nextCapabilities } : {}),
                   ...(nextFeatures ? { features: nextFeatures } : {}),
                 },
@@ -952,8 +1065,8 @@ export const useSessionStore = create<SessionStore>()(
         });
       },
 
-      appendOptimisticUserMessageToAgentStream: (serverId, agentId, message, options) => {
-        let didAppend = false;
+      handoffCreatedAgentUserMessage: (serverId, agentId, message) => {
+        let didHandoff = false;
         set((prev) => {
           const session = prev.sessions[serverId];
           if (!session) {
@@ -962,12 +1075,10 @@ export const useSessionStore = create<SessionStore>()(
 
           const currentTail = session.agentStreamTail.get(agentId) ?? [];
           const currentHead = session.agentStreamHead.get(agentId) ?? [];
-          const result = appendOptimisticUserMessageToStream({
+          const result = handoffCreatedAgentUserMessageToStream({
             tail: currentTail,
             head: currentHead,
             message,
-            placement: options.placement,
-            skipIfUserMessageExists: options.skipIfUserMessageExists,
           });
           if (!result.changedTail && !result.changedHead) {
             return prev;
@@ -979,7 +1090,7 @@ export const useSessionStore = create<SessionStore>()(
           const nextHead = result.changedHead
             ? new Map(session.agentStreamHead).set(agentId, result.head)
             : session.agentStreamHead;
-          didAppend = true;
+          didHandoff = true;
 
           return {
             ...prev,
@@ -993,7 +1104,7 @@ export const useSessionStore = create<SessionStore>()(
             },
           };
         });
-        return didAppend;
+        return didHandoff;
       },
 
       clearAgentStreamHead: (serverId, agentId) => {
@@ -1194,7 +1305,14 @@ export const useSessionStore = create<SessionStore>()(
             ...prev,
             sessions: {
               ...prev.sessions,
-              [serverId]: { ...session, agents: nextAgents },
+              [serverId]: {
+                ...session,
+                agents: nextAgents,
+                workspaceAgentActivity: buildWorkspaceAgentActivityIndex(
+                  nextAgents,
+                  session.workspaceAgentActivity,
+                ),
+              },
             },
           };
         });

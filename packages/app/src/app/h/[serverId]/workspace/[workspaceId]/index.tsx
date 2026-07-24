@@ -1,20 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigation } from "@react-navigation/native";
 import { StyleSheet, View } from "react-native";
 import { useGlobalSearchParams, useLocalSearchParams, useRootNavigationState } from "expo-router";
 import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
+import { RetainedPanel } from "@/components/retained-panel";
 import {
   type ActiveWorkspaceSelection,
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { useHasHydratedWorkspaces, useWorkspaceExists } from "@/stores/session-store-hooks";
-import type { WorkspaceTabTarget } from "@/stores/workspace-tabs-store";
+import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import { WorkspaceScreen } from "@/screens/workspace/workspace-screen";
 import { useWorkspaceLayoutStoreHydrated } from "@/stores/workspace-layout-store";
 import {
   areWorkspaceSelectionListsEqual,
   areWorkspaceSelectionsEqual,
   getWorkspaceSelectionKey,
+  orderWorkspaceSelectionsForStableRender,
   pruneMountedWorkspaceSelections,
   shouldKeepWorkspaceDeckEntryMounted,
   WORKSPACE_DECK_MAX_MOUNTED_WORKSPACES,
@@ -106,6 +108,14 @@ function HostWorkspaceRouteContent() {
     ? (decodeWorkspaceIdFromPathSegment(workspaceValue) ?? "")
     : "";
   const openValue = getParamValue(globalParams.open);
+  const hasHydratedWorkspaces = useHasHydratedWorkspaces(serverId);
+  const workspaceExists = useWorkspaceExists(serverId, workspaceId);
+  const openIntent = useMemo(() => parseWorkspaceOpenIntent(openValue), [openValue]);
+  const recoveryAgentId = openIntent?.kind === "agent" ? openIntent.agentId : null;
+  const isAgentOpenIntent = recoveryAgentId !== null;
+  const isOpenIntentWaitingForWorkspace = Boolean(
+    isAgentOpenIntent && (!hasHydratedWorkspaces || !workspaceExists),
+  );
   useEffect(() => {
     if (!serverId || !workspaceId) {
       return;
@@ -123,6 +133,9 @@ function HostWorkspaceRouteContent() {
     if (!hasHydratedWorkspaceLayoutStore) {
       return;
     }
+    if (isOpenIntentWaitingForWorkspace) {
+      return;
+    }
 
     const consumptionKey = `${serverId}:${workspaceId}:${openValue}`;
     if (consumedIntentRef.current === consumptionKey) {
@@ -136,7 +149,6 @@ function HostWorkspaceRouteContent() {
     }
     consumedIntentRef.current = consumptionKey;
 
-    const openIntent = parseWorkspaceOpenIntent(openValue);
     if (openIntent) {
       prepareWorkspaceTab({
         serverId,
@@ -158,21 +170,33 @@ function HostWorkspaceRouteContent() {
     setIntentConsumed(true);
   }, [
     hasHydratedWorkspaceLayoutStore,
+    isOpenIntentWaitingForWorkspace,
     navigation,
+    openIntent,
     openValue,
     rootNavigationState?.key,
     serverId,
     workspaceId,
   ]);
 
-  if (openValue && (!intentConsumed || !hasHydratedWorkspaceLayoutStore)) {
+  if (
+    openValue &&
+    !isOpenIntentWaitingForWorkspace &&
+    (!intentConsumed || !hasHydratedWorkspaceLayoutStore)
+  ) {
     return null;
   }
 
-  return <WorkspaceDeck />;
+  return <WorkspaceDeck recoveryRequested={isAgentOpenIntent} recoveryAgentId={recoveryAgentId} />;
 }
 
-function WorkspaceDeck() {
+function WorkspaceDeck({
+  recoveryRequested,
+  recoveryAgentId,
+}: {
+  recoveryRequested: boolean;
+  recoveryAgentId: string | null;
+}) {
   const activeSelection = useActiveWorkspaceSelection();
   const [mountedSelections, setMountedSelections] = useState<ActiveWorkspaceSelection[]>(() =>
     activeSelection ? [activeSelection] : [],
@@ -185,22 +209,25 @@ function WorkspaceDeck() {
     );
   }, []);
 
-  useEffect(() => {
-    if (!activeSelection) {
-      return;
-    }
-    setMountedSelections((current) => {
-      const next = pruneMountedWorkspaceSelections({
-        currentSelections: current,
+  const nextMountedSelections = useMemo(
+    () =>
+      pruneMountedWorkspaceSelections({
+        currentSelections: mountedSelections,
         activeSelection,
         maxMountedWorkspaces: WORKSPACE_DECK_MAX_MOUNTED_WORKSPACES,
-      });
-      if (areWorkspaceSelectionListsEqual(current, next)) {
-        return current;
-      }
-      return next;
-    });
-  }, [activeSelection]);
+      }),
+    [activeSelection, mountedSelections],
+  );
+  const renderedSelections = useMemo(
+    () => orderWorkspaceSelectionsForStableRender(nextMountedSelections),
+    [nextMountedSelections],
+  );
+
+  useLayoutEffect(() => {
+    if (!areWorkspaceSelectionListsEqual(mountedSelections, nextMountedSelections)) {
+      setMountedSelections(nextMountedSelections);
+    }
+  }, [mountedSelections, nextMountedSelections]);
 
   if (!activeSelection) {
     return null;
@@ -208,12 +235,14 @@ function WorkspaceDeck() {
 
   return (
     <View style={styles.deck}>
-      {mountedSelections.map((selection) => {
+      {renderedSelections.map((selection) => {
         return (
           <WorkspaceDeckEntry
             key={getWorkspaceSelectionKey(selection)}
             selection={selection}
             activeSelection={activeSelection}
+            recoveryRequested={recoveryRequested}
+            recoveryAgentId={recoveryAgentId}
             onUnmountInactive={unmountWorkspaceSelection}
           />
         );
@@ -225,10 +254,14 @@ function WorkspaceDeck() {
 function WorkspaceDeckEntry({
   selection,
   activeSelection,
+  recoveryRequested,
+  recoveryAgentId,
   onUnmountInactive,
 }: {
   selection: ActiveWorkspaceSelection;
   activeSelection: ActiveWorkspaceSelection;
+  recoveryRequested: boolean;
+  recoveryAgentId: string | null;
   onUnmountInactive: (selection: ActiveWorkspaceSelection) => void;
 }) {
   const isActive = areWorkspaceSelectionsEqual(selection, activeSelection);
@@ -251,28 +284,23 @@ function WorkspaceDeckEntry({
   }
 
   return (
-    <View
-      style={isActive ? styles.activeDeckEntry : styles.inactiveDeckEntry}
+    <RetainedPanel
+      active={isActive}
       testID={`workspace-deck-entry-${selection.serverId}:${selection.workspaceId}`}
     >
       <WorkspaceScreen
         serverId={selection.serverId}
         workspaceId={selection.workspaceId}
         isRouteFocused={isActive}
+        recoveryRequested={isActive && recoveryRequested}
+        recoveryAgentId={isActive ? recoveryAgentId : null}
       />
-    </View>
+    </RetainedPanel>
   );
 }
 
 const styles = StyleSheet.create({
   deck: {
-    flex: 1,
-  },
-  activeDeckEntry: {
-    flex: 1,
-  },
-  inactiveDeckEntry: {
-    display: "none",
     flex: 1,
   },
 });
