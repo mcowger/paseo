@@ -512,14 +512,14 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   const providers: MutableDaemonConfig["providers"] = Object.fromEntries(
     Object.entries(config.providerOverrides ?? {}).map(([providerId, override]) => {
       const providerConfig: MutableDaemonConfig["providers"][string] = {};
+      if (override.paseoTools) {
+        providerConfig.paseoTools = override.paseoTools;
+      }
       if (override.enabled !== undefined) {
         providerConfig.enabled = override.enabled;
       }
       if (override.additionalModels) {
         providerConfig.additionalModels = override.additionalModels;
-      }
-      if (override.paseoTools) {
-        providerConfig.paseoTools = override.paseoTools;
       }
       return [providerId, providerConfig];
     }),
