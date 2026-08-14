@@ -35,7 +35,7 @@ export type ServiceUrlBehavior = "ask" | "in-app" | "external";
 export type WorkspaceTitleSource = "title" | "branch";
 /** What a sidebar workspace row shows in the space to the right of its title. */
 export type SidebarWorkspaceTrailing = "diff" | "timestamp" | "none";
-export type ThinkingDisplayDetail = "collapsed" | "expand_active" | "expanded";
+export type ThinkingDisplayDetail = "collapsed" | "expand_last" | "expanded";
 export type ToolCallDetailLevel = "overview" | "detailed";
 
 const ThemePreferenceSchema = z.enum([
@@ -55,7 +55,7 @@ const VALID_SIDEBAR_WORKSPACE_TRAILINGS = new Set<SidebarWorkspaceTrailing>([
 const VALID_TOOL_CALL_DETAIL_LEVELS = new Set<ToolCallDetailLevel>(["overview", "detailed"]);
 const VALID_THINKING_DISPLAY_DETAILS = new Set<ThinkingDisplayDetail>([
   "collapsed",
-  "expand_active",
+  "expand_last",
   "expanded",
 ]);
 export const DEFAULT_TERMINAL_SCROLLBACK_LINES = 10_000;
@@ -150,7 +150,7 @@ const StoredAppSettingsSchema = z.strictObject({
   sidebarRowItems: SidebarRowItemsSchema.optional(),
   sidebarChecksDisplay: z.enum(["iconAndText", "icon", "none"]).optional(),
   autoExpandReasoning: z
-    .union([z.enum(["collapsed", "expand_active", "expanded"]), z.boolean()])
+    .union([z.enum(["collapsed", "expand_last", "expand_active", "expanded"]), z.boolean()])
     .optional(),
   toolCallDetailLevel: z.enum(["overview", "detailed"]).optional(),
   compactToolCalls: z.boolean().optional(),
@@ -316,6 +316,10 @@ export function normalizeAppSettings(value: unknown): AppSettings {
 
 function parseThinkingDisplayDetail(stored: StoredAppSettings): ThinkingDisplayDetail | null {
   if (stored.autoExpandReasoning !== undefined) {
+    if (stored.autoExpandReasoning === "expand_active") {
+      // COMPAT(autoExpandReasoningExpandActive): migrated to expand_last in v0.4.0.
+      return "expand_last";
+    }
     if (
       typeof stored.autoExpandReasoning === "string" &&
       VALID_THINKING_DISPLAY_DETAILS.has(stored.autoExpandReasoning as ThinkingDisplayDetail)

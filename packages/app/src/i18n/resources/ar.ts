@@ -1939,7 +1939,7 @@ export const ar: TranslationResources = {
         accessibilityLabel: "تحديد عرض التفكير ({{value}})",
         options: {
           collapsed: "مطوي",
-          expandActive: "توسيع النشط",
+          expandLast: "توسيع الأخير",
           expanded: "توسيع دائماً",
         },
       },

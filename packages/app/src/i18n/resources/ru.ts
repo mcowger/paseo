@@ -1972,7 +1972,7 @@ export const ru: TranslationResources = {
         accessibilityLabel: "Выбор отображения мышления ({{value}})",
         options: {
           collapsed: "Свернуто",
-          expandActive: "Разворачивать активный",
+          expandLast: "Разворачивать последний",
           expanded: "Всегда разворачивать",
         },
       },
