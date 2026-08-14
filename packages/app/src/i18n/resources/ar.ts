@@ -1934,8 +1934,14 @@ export const ar: TranslationResources = {
           "تفتح روابط الملفات وطلبات السحب وتقدم الإعداد بجوار عملك بدلاً من الجزء المركّز عليه",
       },
       autoExpandReasoning: {
-        label: "عرض التفكير دائماً",
-        description: "إظهار تفكير الوكيل وخطوات الاستدلال بشكل كامل بشكل افتراضي",
+        label: "عرض التفكير",
+        description: "كيفية ظهور كتل التفكير في المخطط الزمني",
+        accessibilityLabel: "تحديد عرض التفكير ({{value}})",
+        options: {
+          collapsed: "مطوي",
+          expandActive: "توسيع النشط",
+          expanded: "توسيع دائماً",
+        },
       },
       toolCallDetail: {
         label: "عرض استدعاءات الأدوات",

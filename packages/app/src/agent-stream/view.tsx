@@ -64,6 +64,7 @@ import {
   prepareToolCallHistory,
   projectToolCallDetailLevel,
 } from "@/tool-calls/detail-level/projection";
+import { formatThinkingText } from "@/utils/thinking-text-formatter";
 import { OverviewToolCallGroupView } from "@/tool-calls/detail-level/overview/view";
 import { type AgentStreamRenderModel, buildAgentStreamRenderModel } from "./model";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
@@ -709,16 +710,20 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     const renderThoughtItem = useCallback(
       (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "thought" }>) => {
+        const isThoughtActive = item.status !== "ready";
+        const isExpanded =
+          autoExpandReasoning === "expanded" ||
+          (autoExpandReasoning === "expand_active" && isThoughtActive);
         return (
           <ToolCallSlot
             itemId={item.id}
             onInlineDetailsExpandedChangeByItemId={setInlineDetailsExpanded}
             toolName="thinking"
-            args={item.text}
+            args={formatThinkingText(item.text)}
             status={item.status === "ready" ? "completed" : "executing"}
             isLastInSequence={layoutItem.isLastInToolSequence}
-            defaultExpanded={autoExpandReasoning}
-            forceInline={autoExpandReasoning}
+            defaultExpanded={isExpanded}
+            forceInline={isExpanded}
           />
         );
       },
