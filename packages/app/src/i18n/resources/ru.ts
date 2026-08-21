@@ -1976,7 +1976,6 @@ export const ru: TranslationResources = {
           expanded: "Всегда разворачивать",
         },
       },
-      },
       toolCallDetail: {
         label: "Отображение вызовов инструментов",
         description: "Как вызовы инструментов отображаются на временной шкале",
