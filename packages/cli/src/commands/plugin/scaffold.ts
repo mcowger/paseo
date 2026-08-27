@@ -193,6 +193,13 @@ declare module "@getpaseo/plugin" {
   }
 
   export type PluginTimelineData = null | boolean | number | string | PluginTimelineData[] | { [key: string]: PluginTimelineData };
+  export interface PluginTimelineItemSourceSeqRange { readonly startSeq: number; readonly endSeq: number; }
+  export interface PluginTimelineItemSource {
+    readonly epoch: string;
+    readonly seqStart: number;
+    readonly seqEnd: number;
+    readonly sourceSeqRanges: readonly PluginTimelineItemSourceSeqRange[];
+  }
   export interface PluginTimelineItem { type: "plugin"; kind: string; version: number; data: PluginTimelineData; }
   export interface PluginTimelineTransformResult { items: PluginTimelineItem[]; }
   export type PluginTimelineTransformerContribution<ItemType extends AgentTimelineItem["type"] = AgentTimelineItem["type"]> =
@@ -206,6 +213,7 @@ declare module "@getpaseo/plugin" {
   export interface PluginTimelineItemProps<Data = unknown> extends PluginHostProps {
     agentId: string;
     item: { type: "plugin"; kind: string; version: number; data: Data };
+    source: PluginTimelineItemSource | null;
     timestamp: Date;
   }
   export interface PluginTimelineRendererContribution<Schema extends ZodType = ZodType> {
