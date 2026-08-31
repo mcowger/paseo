@@ -98,6 +98,7 @@ const PASEO_PI_SUBMITTED_USER_ENTRY_MARKER = "PASEO_SUBMITTED_USER_ENTRY";
 const PASEO_PI_COMMAND_RESULT_MARKER = "PASEO_COMMAND_RESULT";
 const DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PI_RPC_TIMEOUT_MS = 60_000;
+const PI_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 const QUESTION_RESPONSE_HEADER = "Response";
 const QUESTION_COMMENT_HEADER = "Comment";
 const PI_ASK_USER_FREEFORM_SENTINEL = "✏️ Type custom response...";
@@ -231,7 +232,9 @@ function isPiDefinitiveSteerRejection(error: unknown): boolean {
   return toDiagnosticErrorMessage(error) === "Unknown command: steer";
 }
 
-function isPiMissingClearQueueRpc(error: unknown): boolean {
+// COMPAT(piClearQueueFallback): added in v0.7.0, remove after 2027-03-01 once the Pi floor
+// supports the clear_queue RPC. Older binaries must still be interruptible.
+function isPiClearQueueUnsupported(error: unknown): boolean {
   return toDiagnosticErrorMessage(error) === "Unknown command: clear_queue";
 }
 
@@ -1536,13 +1539,17 @@ export class PiRpcAgentSession implements AgentSession {
       this.lastInterruptedTurnId = turnId;
     }
     try {
-      try {
-        await this.runtimeSession.clearQueue();
-      } catch (error) {
-        // COMPAT(piClearQueueFallback): added in v0.5.0, remove after 2027-03-01 once
-        // the pi floor supports clear_queue (added in pi 0.84.4).
-        if (!isPiMissingClearQueueRpc(error)) {
-          throw error;
+      // Pi returns removed queue entries for clients that restore them to an editor. Paseo has
+      // already recorded admitted steers in its timeline, so interruption discards the entries.
+      if (turnId) {
+        try {
+          await this.runtimeSession.clearQueue(PI_CLEAR_QUEUE_TIMEOUT_MS);
+        } catch (error) {
+          if (isPiClearQueueUnsupported(error)) {
+            this.logger.debug("Pi clear_queue is unsupported; continuing interrupt");
+          } else {
+            this.logger.warn({ err: error }, "Failed to clear Pi queue before interrupt");
+          }
         }
       }
       await this.runtimeSession.abort();

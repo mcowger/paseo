@@ -398,15 +398,21 @@ describe("PiCliRuntime", () => {
     expect(command.images).toBeUndefined();
   });
 
-  test("sends the clear_queue RPC frame", async () => {
+  test("sends the clear_queue RPC frame and returns its result", async () => {
     const child = createPiChild();
-    replyToCommands(child, () => ({}));
+    replyToCommands(child, (command) =>
+      command.type === "clear_queue" ? { steering: ["steer"], followUp: ["follow-up"] } : {},
+    );
     const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
 
     const clearQueueCommand = capturePendingCommand(child, "clear_queue");
-    await session.clearQueue();
+    const resultPromise = session.clearQueue();
 
     expect(await clearQueueCommand).toMatchObject({ type: "clear_queue" });
+    await expect(resultPromise).resolves.toEqual({
+      steering: ["steer"],
+      followUp: ["follow-up"],
+    });
   });
 
   test("falls back to get_state when get_session_stats is unsupported", async () => {

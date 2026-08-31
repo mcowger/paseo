@@ -6,6 +6,7 @@ import type {
 } from "../runtime.js";
 import type {
   PiAgentMessage,
+  PiClearQueueResult,
   PiModel,
   PiPromptAck,
   PiRpcSlashCommand,
@@ -214,11 +215,12 @@ export class FakePiSession implements PiRuntimeSession {
     }
   }
 
-  async clearQueue(): Promise<void> {
+  async clearQueue(_timeoutMs?: number | null): Promise<PiClearQueueResult> {
     this.controlRequests.push("clear_queue");
     if (this.clearQueueError) {
       throw this.clearQueueError;
     }
+    return { steering: [], followUp: [] };
   }
 
   async compact(customInstructions?: string): Promise<void> {

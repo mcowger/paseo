@@ -16,6 +16,7 @@ import {
 } from "./runtime.js";
 import type {
   PiAgentMessage,
+  PiClearQueueResult,
   PiModel,
   PiPromptAck,
   PiRpcCommand,
@@ -132,10 +133,6 @@ class PiCliRuntimeSession implements PiRuntimeSession {
     });
   }
 
-  async clearQueue(): Promise<void> {
-    await this.request({ type: "clear_queue" });
-  }
-
   async compact(customInstructions?: string): Promise<void> {
     await this.waitForCompletion({
       type: "compact",
@@ -205,6 +202,10 @@ class PiCliRuntimeSession implements PiRuntimeSession {
       }
     }
     return stats ?? {};
+  }
+
+  async clearQueue(timeoutMs?: number | null): Promise<PiClearQueueResult> {
+    return (await this.request({ type: "clear_queue" }, timeoutMs)) as PiClearQueueResult;
   }
 
   async getCommands(): Promise<PiRpcSlashCommand[]> {

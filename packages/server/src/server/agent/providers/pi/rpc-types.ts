@@ -14,6 +14,11 @@ export interface PiPromptAck {
   agentInvoked?: boolean;
 }
 
+export interface PiClearQueueResult {
+  steering: string[];
+  followUp: string[];
+}
+
 export interface PiTextContent {
   type: "text";
   text: string;

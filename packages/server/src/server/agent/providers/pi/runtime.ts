@@ -1,5 +1,6 @@
 import type {
   PiAgentMessage,
+  PiClearQueueResult,
   PiModel,
   PiPromptAck,
   PiRpcSlashCommand,
@@ -49,7 +50,6 @@ export interface PiRuntimeSession {
     message: string,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void>;
-  clearQueue(): Promise<void>;
   compact(customInstructions?: string): Promise<void>;
   setAutoCompaction(enabled: boolean): Promise<void>;
   abort(): Promise<void>;
@@ -59,6 +59,7 @@ export interface PiRuntimeSession {
   setModel(provider: string, modelId: string): Promise<PiModel>;
   setThinkingLevel(level: string): Promise<void>;
   getSessionStats(): Promise<PiSessionStats>;
+  clearQueue(timeoutMs?: number | null): Promise<PiClearQueueResult>;
   getCommands(): Promise<PiRpcSlashCommand[]>;
   request(
     command: { type: string; [key: string]: unknown },

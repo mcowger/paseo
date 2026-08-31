@@ -886,6 +886,47 @@ describe("PiRpcAgentSession", () => {
     );
   });
 
+  test("clears Pi's pending queue before aborting an active turn", async () => {
+    const { pi, session } = await createSession();
+    const fakeSession = pi.latestSession();
+
+    await session.startTurn("stop this turn");
+    await session.interrupt();
+
+    expect(fakeSession.controlRequests).toEqual(["clear_queue", "abort"]);
+  });
+
+  test("does not clear Pi's queue when no turn is active", async () => {
+    const { pi, session } = await createSession();
+    const fakeSession = pi.latestSession();
+
+    await session.interrupt();
+
+    expect(fakeSession.controlRequests).toEqual(["abort"]);
+  });
+
+  test("continues interrupting when Pi does not support clear_queue", async () => {
+    const { pi, session } = await createSession();
+    const fakeSession = pi.latestSession();
+    fakeSession.clearQueueError = new Error("Unknown command: clear_queue");
+
+    await session.startTurn("stop this turn");
+    await session.interrupt();
+
+    expect(fakeSession.controlRequests).toEqual(["clear_queue", "abort"]);
+  });
+
+  test("continues interrupting when clearing Pi's queue fails", async () => {
+    const { pi, session } = await createSession();
+    const fakeSession = pi.latestSession();
+    fakeSession.clearQueueError = new Error("Pi queue is unavailable");
+
+    await session.startTurn("stop this turn");
+    await session.interrupt();
+
+    expect(fakeSession.controlRequests).toEqual(["clear_queue", "abort"]);
+  });
+
   test("treats Pi's aborted terminal response as cancellation after an interrupt", async () => {
     const { pi, session, events } = await createSession();
     const fakeSession = pi.latestSession();
